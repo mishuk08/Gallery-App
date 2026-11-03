@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Sky atmospheric breeze ripples -->
+    <path
+        android:pathData="M18,36 C32,34 46,40 62,37 C76,34 88,39 96,36"
+        android:strokeWidth="1.8"
+        android:strokeColor="#45FFFFFF"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M15,44 C30,41 44,48 65,44 C78,41 88,46 98,43"
+        android:strokeWidth="2.2"
+        android:strokeColor="#35FFFFFF"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M24,52 C38,49 50,54 70,51 C82,49 92,53 98,51"
+        android:strokeWidth="1.5"
+        android:strokeColor="#25FFFFFF"
+        android:strokeLineCap="round" />
+
+    <!-- Luminous Sun in top-right -->
+    <!-- Sun glow outer -->
+    <path
+        android:pathData="M70,33 m-12,0 a12,12 0 1,0 24,0 a12,12 0 1,0 -24,0"
+        android:fillColor="#30FFFDF0" />
+    <!-- Sun core -->
+    <path
+        android:pathData="M70,33 m-9,0 a9,9 0 1,0 18,0 a9,9 0 1,0 -18,0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="66"
+                android:startY="26"
+                android:endX="74"
+                android:endY="40"
+                android:type="linear">
+                <item android:color="#FFFFF0" android:offset="0.0" />
+                <item android:color="#FFF2B8" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Dune Layer 1 (Upper Dune) -->
+    <path android:pathData="M0,48 C16,48 34,56 56,64 C76,71 92,67 108,60 L108,108 L0,108 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="10"
+                android:startY="48"
+                android:endX="90"
+                android:endY="100"
+                android:type="linear">
+                <item android:color="#E98042" android:offset="0.0" />
+                <item android:color="#D66B30" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Dune Layer 2 (Middle rolling ridge) -->
+    <path android:pathData="M0,68 C22,68 40,76 66,80 C84,83 96,78 108,72 L108,108 L0,108 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="0"
+                android:startY="68"
+                android:endX="108"
+                android:endY="108"
+                android:type="linear">
+                <item android:color="#DC7135" android:offset="0.0" />
+                <item android:color="#C45722" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Dune Layer 3 (Bottom foreground sweep) -->
+    <path android:pathData="M0,86 C28,84 52,94 80,94 C94,94 102,90 108,87 L108,108 L0,108 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="0"
+                android:startY="84"
+                android:endX="108"
+                android:endY="108"
+                android:type="linear">
+                <item android:color="#D1632A" android:offset="0.0" />
+                <item android:color="#B54A17" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

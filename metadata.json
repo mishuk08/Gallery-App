@@ -1,0 +1,6 @@
+{
+  "name": "Gallery",
+  "description": "Fluid glassmorphic photo gallery with secret gesture vault and persistent customization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
