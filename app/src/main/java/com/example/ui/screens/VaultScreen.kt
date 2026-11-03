@@ -3,11 +3,17 @@ package com.example.ui.screens
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -241,14 +247,27 @@ private fun VaultAccountRegistrationView(
     viewModel: GalleryViewModel,
     onBackToGallery: () -> Unit
 ) {
+    val context = LocalContext.current
     val isDark = LocalIsDarkMode.current
-    var isLoginMode by remember { mutableStateOf(false) }
+    var activeTab by remember { mutableStateOf(0) } // 0: Create, 1: Log In, 2: Restore Vault
     var userName by remember { mutableStateOf("") }
     var pin by remember { mutableStateOf("") }
     var confirmPin by remember { mutableStateOf("") }
     var loginName by remember { mutableStateOf("") }
     var loginId by remember { mutableStateOf("") }
+    var restoreBackupUri by remember { mutableStateOf<Uri?>(null) }
+    var restorePin by remember { mutableStateOf("") }
+    var isRestoring by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    val backupPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            restoreBackupUri = uri
+            errorMessage = null
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -327,7 +346,7 @@ private fun VaultAccountRegistrationView(
                     .padding(20.dp)
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    // Segmented Switch: Create Account vs Log In
+                    // 3-way Segmented Switch: Create Account vs Log In vs Restore Vault
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -335,175 +354,211 @@ private fun VaultAccountRegistrationView(
                             .background(if (isDark) Color(0x20FFFFFF) else Color(0x10000000))
                             .padding(4.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(11.dp))
-                                .background(if (!isLoginMode) AccentGold else Color.Transparent)
-                                .clickable {
-                                    isLoginMode = false
-                                    errorMessage = null
-                                }
-                                .padding(vertical = 9.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "Create Account",
-                                color = if (!isLoginMode) OledBlack else TextSecondary,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
-                            )
-                        }
-
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(11.dp))
-                                .background(if (isLoginMode) AccentGold else Color.Transparent)
-                                .clickable {
-                                    isLoginMode = true
-                                    errorMessage = null
-                                }
-                                .padding(vertical = 9.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "Log In",
-                                color = if (isLoginMode) OledBlack else TextSecondary,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
-                            )
+                        listOf("Create", "Log In", "Restore").forEachIndexed { index, title ->
+                            val isSelected = activeTab == index
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(11.dp))
+                                    .background(if (isSelected) AccentGold else Color.Transparent)
+                                    .clickable {
+                                        activeTab = index
+                                        errorMessage = null
+                                    }
+                                    .padding(vertical = 9.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = title,
+                                    color = if (isSelected) OledBlack else TextSecondary,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp
+                                )
+                            }
                         }
                     }
 
                     Spacer(modifier = Modifier.height(2.dp))
 
-                    if (isLoginMode) {
-                        OutlinedTextField(
-                            value = loginName,
-                            onValueChange = {
-                                loginName = it
-                                errorMessage = null
-                            },
-                            label = { Text("Your Name") },
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary,
-                                focusedBorderColor = AccentGold,
-                                unfocusedBorderColor = if (isDark) Color(0x30FFFFFF) else Color(0x30000000)
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("login_name_input")
-                        )
-
-                        OutlinedTextField(
-                            value = loginId,
-                            onValueChange = {
-                                loginId = it
-                                errorMessage = null
-                            },
-                            label = { Text("Vault ID (e.g. VLT-XXXX)") },
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary,
-                                focusedBorderColor = AccentGold,
-                                unfocusedBorderColor = if (isDark) Color(0x30FFFFFF) else Color(0x30000000)
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("login_vault_id_input")
-                        )
-
-                        OutlinedTextField(
-                            value = pin,
-                            onValueChange = {
-                                if (it.length <= 6 && it.all { ch -> ch.isDigit() }) {
-                                    pin = it
+                    when (activeTab) {
+                        0 -> {
+                            // Create Account
+                            OutlinedTextField(
+                                value = userName,
+                                onValueChange = {
+                                    userName = it
                                     errorMessage = null
-                                }
-                            },
-                            label = { Text("6-Digit Password / PIN") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary,
-                                focusedBorderColor = AccentGold,
-                                unfocusedBorderColor = if (isDark) Color(0x30FFFFFF) else Color(0x30000000)
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("login_password_input")
-                        )
-                    } else {
-                        OutlinedTextField(
-                            value = userName,
-                            onValueChange = {
-                                userName = it
-                                errorMessage = null
-                            },
-                            label = { Text("Your Name") },
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary,
-                                focusedBorderColor = AccentGold,
-                                unfocusedBorderColor = if (isDark) Color(0x30FFFFFF) else Color(0x30000000)
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("create_name_input")
-                        )
+                                },
+                                label = { Text("Your Name") },
+                                singleLine = true,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = TextPrimary,
+                                    unfocusedTextColor = TextPrimary,
+                                    focusedBorderColor = AccentGold,
+                                    unfocusedBorderColor = if (isDark) Color(0x30FFFFFF) else Color(0x30000000)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("create_name_input")
+                            )
 
-                        OutlinedTextField(
-                            value = pin,
-                            onValueChange = {
-                                if (it.length <= 6 && it.all { ch -> ch.isDigit() }) {
-                                    pin = it
-                                    errorMessage = null
-                                }
-                            },
-                            label = { Text("6-Digit PIN") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary,
-                                focusedBorderColor = AccentGold,
-                                unfocusedBorderColor = if (isDark) Color(0x30FFFFFF) else Color(0x30000000)
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("create_password_input")
-                        )
+                            OutlinedTextField(
+                                value = pin,
+                                onValueChange = {
+                                    if (it.length <= 6 && it.all { ch -> ch.isDigit() }) {
+                                        pin = it
+                                        errorMessage = null
+                                    }
+                                },
+                                label = { Text("6-Digit PIN") },
+                                visualTransformation = PasswordVisualTransformation(),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                                singleLine = true,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = TextPrimary,
+                                    unfocusedTextColor = TextPrimary,
+                                    focusedBorderColor = AccentGold,
+                                    unfocusedBorderColor = if (isDark) Color(0x30FFFFFF) else Color(0x30000000)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("create_password_input")
+                            )
 
-                        OutlinedTextField(
-                            value = confirmPin,
-                            onValueChange = {
-                                if (it.length <= 6 && it.all { ch -> ch.isDigit() }) {
-                                    confirmPin = it
+                            OutlinedTextField(
+                                value = confirmPin,
+                                onValueChange = {
+                                    if (it.length <= 6 && it.all { ch -> ch.isDigit() }) {
+                                        confirmPin = it
+                                        errorMessage = null
+                                    }
+                                },
+                                label = { Text("Confirm 6-Digit PIN") },
+                                visualTransformation = PasswordVisualTransformation(),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                                singleLine = true,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = TextPrimary,
+                                    unfocusedTextColor = TextPrimary,
+                                    focusedBorderColor = AccentGold,
+                                    unfocusedBorderColor = if (isDark) Color(0x30FFFFFF) else Color(0x30000000)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("confirm_password_input")
+                            )
+                        }
+                        1 -> {
+                            // Log In (local account switch)
+                            OutlinedTextField(
+                                value = loginName,
+                                onValueChange = {
+                                    loginName = it
                                     errorMessage = null
-                                }
-                            },
-                            label = { Text("Confirm 6-Digit PIN") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary,
-                                focusedBorderColor = AccentGold,
-                                unfocusedBorderColor = if (isDark) Color(0x30FFFFFF) else Color(0x30000000)
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("confirm_password_input")
-                        )
+                                },
+                                label = { Text("Your Name") },
+                                singleLine = true,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = TextPrimary,
+                                    unfocusedTextColor = TextPrimary,
+                                    focusedBorderColor = AccentGold,
+                                    unfocusedBorderColor = if (isDark) Color(0x30FFFFFF) else Color(0x30000000)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("login_name_input")
+                            )
+
+                            OutlinedTextField(
+                                value = loginId,
+                                onValueChange = {
+                                    loginId = it
+                                    errorMessage = null
+                                },
+                                label = { Text("Vault ID (e.g. VLT-XXXX)") },
+                                singleLine = true,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = TextPrimary,
+                                    unfocusedTextColor = TextPrimary,
+                                    focusedBorderColor = AccentGold,
+                                    unfocusedBorderColor = if (isDark) Color(0x30FFFFFF) else Color(0x30000000)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("login_vault_id_input")
+                            )
+
+                            OutlinedTextField(
+                                value = pin,
+                                onValueChange = {
+                                    if (it.length <= 6 && it.all { ch -> ch.isDigit() }) {
+                                        pin = it
+                                        errorMessage = null
+                                    }
+                                },
+                                label = { Text("6-Digit Password / PIN") },
+                                visualTransformation = PasswordVisualTransformation(),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                                singleLine = true,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = TextPrimary,
+                                    unfocusedTextColor = TextPrimary,
+                                    focusedBorderColor = AccentGold,
+                                    unfocusedBorderColor = if (isDark) Color(0x30FFFFFF) else Color(0x30000000)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("login_password_input")
+                            )
+                        }
+                        2 -> {
+                            // Restore from Encrypted Backup Archive (.vaultbackup)
+                            Text(
+                                text = "Restore an existing encrypted Vault from a .vaultbackup file (reinstalls and device migrations).",
+                                color = TextSecondary,
+                                fontSize = 13.sp
+                            )
+
+                            Button(
+                                onClick = { backupPicker.launch(arrayOf("*/*")) },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (isDark) Color(0x25FFFFFF) else Color(0x10000000),
+                                    contentColor = TextPrimary
+                                ),
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.fillMaxWidth().testTag("select_backup_button")
+                            ) {
+                                Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (restoreBackupUri != null) "Backup File Selected" else "Select .vaultbackup file",
+                                    fontSize = 13.sp
+                                )
+                            }
+
+                            OutlinedTextField(
+                                value = restorePin,
+                                onValueChange = {
+                                    if (it.length <= 6 && it.all { ch -> ch.isDigit() }) {
+                                        restorePin = it
+                                        errorMessage = null
+                                    }
+                                },
+                                label = { Text("6-Digit Backup PIN / Password") },
+                                visualTransformation = PasswordVisualTransformation(),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                                singleLine = true,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = TextPrimary,
+                                    unfocusedTextColor = TextPrimary,
+                                    focusedBorderColor = AccentGold,
+                                    unfocusedBorderColor = if (isDark) Color(0x30FFFFFF) else Color(0x30000000)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("restore_password_input")
+                            )
+                        }
                     }
 
                     if (errorMessage != null) {
@@ -519,41 +574,64 @@ private fun VaultAccountRegistrationView(
 
                     Button(
                         onClick = {
-                            if (isLoginMode) {
-                                if (loginName.isBlank()) {
-                                    errorMessage = "Please enter your Name"
-                                    return@Button
+                            when (activeTab) {
+                                0 -> {
+                                    if (userName.isBlank()) {
+                                        errorMessage = "Please enter your name"
+                                        return@Button
+                                    }
+                                    if (pin.length != 6 || !pin.all { it.isDigit() }) {
+                                        errorMessage = "PIN must be exactly 6 digits"
+                                        return@Button
+                                    }
+                                    if (pin != confirmPin) {
+                                        errorMessage = "PINs do not match"
+                                        return@Button
+                                    }
+                                    val acc = viewModel.createVaultAccount(userName, pin)
+                                    if (acc != null) {
+                                        onAccountCreated(acc)
+                                    } else {
+                                        errorMessage = "Could not create account"
+                                    }
                                 }
-                                if (loginId.isBlank()) {
-                                    errorMessage = "Please enter your Vault ID"
-                                    return@Button
+                                1 -> {
+                                    if (loginName.isBlank()) {
+                                        errorMessage = "Please enter your Name"
+                                        return@Button
+                                    }
+                                    if (loginId.isBlank()) {
+                                        errorMessage = "Please enter your Vault ID"
+                                        return@Button
+                                    }
+                                    if (pin.length != 6 || !pin.all { it.isDigit() }) {
+                                        errorMessage = "Enter your 6-digit password/PIN"
+                                        return@Button
+                                    }
+                                    val ok = viewModel.loginWithVaultCredentials(loginName, loginId, pin)
+                                    if (!ok) {
+                                        errorMessage = "Invalid credentials. Unknown Vault ID or incorrect PIN."
+                                    }
                                 }
-                                if (pin.length != 6 || !pin.all { it.isDigit() }) {
-                                    errorMessage = "Enter your 6-digit password/PIN"
-                                    return@Button
-                                }
-                                val ok = viewModel.loginWithVaultCredentials(loginName, loginId, pin)
-                                if (!ok) {
-                                    errorMessage = "Invalid credentials. Enter correct Name, Vault ID and PIN"
-                                }
-                            } else {
-                                if (userName.isBlank()) {
-                                    errorMessage = "Please enter your name"
-                                    return@Button
-                                }
-                                if (pin.length != 6 || !pin.all { it.isDigit() }) {
-                                    errorMessage = "PIN must be exactly 6 digits"
-                                    return@Button
-                                }
-                                if (pin != confirmPin) {
-                                    errorMessage = "PINs do not match"
-                                    return@Button
-                                }
-                                val acc = viewModel.createVaultAccount(userName, pin)
-                                if (acc != null) {
-                                    onAccountCreated(acc)
-                                } else {
-                                    errorMessage = "Could not create account"
+                                2 -> {
+                                    if (restoreBackupUri == null) {
+                                        errorMessage = "Please select a .vaultbackup file"
+                                        return@Button
+                                    }
+                                    if (restorePin.length != 6 || !restorePin.all { it.isDigit() }) {
+                                        errorMessage = "Enter the 6-digit PIN used when creating the backup"
+                                        return@Button
+                                    }
+                                    isRestoring = true
+                                    errorMessage = null
+                                    viewModel.restoreBackupArchive(restoreBackupUri!!, restorePin) { success, msg ->
+                                        isRestoring = false
+                                        if (success) {
+                                            Toast.makeText(context, "Vault restored: $msg", Toast.LENGTH_LONG).show()
+                                        } else {
+                                            errorMessage = "Restore failed: $msg"
+                                        }
+                                    }
                                 }
                             }
                         },
@@ -567,11 +645,19 @@ private fun VaultAccountRegistrationView(
                             .height(50.dp)
                             .testTag("submit_account_button")
                     ) {
-                        Text(
-                            text = if (isLoginMode) "Log In" else "Create Account",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp
-                        )
+                        if (isRestoring) {
+                            CircularProgressIndicator(color = OledBlack, modifier = Modifier.size(22.dp))
+                        } else {
+                            Text(
+                                text = when (activeTab) {
+                                    0 -> "Create Account"
+                                    1 -> "Log In"
+                                    else -> "Verify & Restore Vault"
+                                },
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp
+                            )
+                        }
                     }
                 }
             }

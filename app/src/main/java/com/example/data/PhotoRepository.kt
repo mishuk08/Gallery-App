@@ -271,6 +271,48 @@ class PhotoRepository(
         }
     }
 
+    /**
+     * Decrypts encrypted media to a temporary file in cacheDir for video playback.
+     * Automatically tagged to delete on JVM exit and safe for media player consumption.
+     */
+    suspend fun decryptToTempPlaybackFile(photo: PhotoEntity, pinOverride: String? = null): File? = withContext(Dispatchers.IO) {
+        if (!photo.isEncrypted) {
+            photo.localFilePath?.let { path ->
+                val f = File(path)
+                if (f.exists()) return@withContext f
+            }
+            return@withContext null
+        }
+
+        val masterKey = vaultManager.getActiveMasterKey()
+        val fallbackPin = pinOverride ?: vaultManager.getActivePin()
+
+        if (masterKey == null && fallbackPin == null) {
+            return@withContext null
+        }
+
+        val encryptedBytes: ByteArray? = photo.localFilePath?.let { path ->
+            val file = File(path)
+            if (file.exists()) file.readBytes() else null
+        } ?: photo.cloudUrl?.let { url ->
+            CloudUploadService.downloadBytes(url)
+        }
+
+        if (encryptedBytes == null) return@withContext null
+
+        try {
+            val effectiveMasterKey = masterKey ?: CryptoManager.generateMasterKey()
+            val decryptedBytes = CryptoManager.decryptMedia(encryptedBytes, effectiveMasterKey, fallbackPin)
+            val ext = if (photo.isVideo) ".mp4" else ".jpg"
+            val tempFile = File.createTempFile("playback_${photo.id}_", ext, context.cacheDir)
+            tempFile.deleteOnExit()
+            FileOutputStream(tempFile).use { it.write(decryptedBytes) }
+            tempFile
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     suspend fun loadPlainBitmap(photo: PhotoEntity): Bitmap? = withContext(Dispatchers.IO) {
         if (photo.isVideo) {
             return@withContext loadVideoThumbnail(photo)

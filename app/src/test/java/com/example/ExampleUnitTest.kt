@@ -165,4 +165,157 @@ class ExampleUnitTest {
         assertFalse(seenUris.add(uri1)) // Duplicate URI rejected
         assertEquals(2, seenUris.size)
     }
+
+    @Test
+    fun testLegacyVLT1FileMigrationToVLT2() {
+        // Construct a legacy VLT1 file encrypted directly with PIN
+        val legacyPin = "778899"
+        val secretPhoto = "Legacy family memory 2024".toByteArray(Charsets.UTF_8)
+        val legacySalt = ByteArray(16).apply { java.security.SecureRandom().nextBytes(this) }
+        val legacyIv = ByteArray(12).apply { java.security.SecureRandom().nextBytes(this) }
+
+        val factory = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+        val spec = javax.crypto.spec.PBEKeySpec(legacyPin.toCharArray(), legacySalt, 100_000, 256)
+        val key = javax.crypto.spec.SecretKeySpec(factory.generateSecret(spec).encoded, "AES")
+        val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, key, javax.crypto.spec.GCMParameterSpec(128, legacyIv))
+        val cipherBytes = cipher.doFinal(secretPhoto)
+
+        val vlt1Payload = java.io.ByteArrayOutputStream().apply {
+            write("VLT1".toByteArray(Charsets.US_ASCII))
+            write(legacySalt)
+            write(legacyIv)
+            write(cipherBytes)
+        }.toByteArray()
+
+        // Decrypt using CryptoManager backward-compatible decryptMedia with fallback PIN
+        val masterKey = CryptoManager.generateMasterKey()
+        val recovered = CryptoManager.decryptMedia(vlt1Payload, masterKey, fallbackPin = legacyPin)
+        assertArrayEquals(secretPhoto, recovered)
+
+        // Migrate to VLT2 Master Key format
+        val vlt2Payload = CryptoManager.encryptWithMasterKey(recovered, masterKey)
+        assertTrue(CryptoManager.isEncryptedPayload(vlt2Payload))
+
+        // Verify VLT2 decrypts cleanly with the Master Key alone without needing legacy PIN derivation
+        val reDecrypted = CryptoManager.decryptMedia(vlt2Payload, masterKey, fallbackPin = null)
+        assertArrayEquals(secretPhoto, reDecrypted)
+    }
+
+    @Test
+    fun testTamperedBackupArchiveRejection() {
+        val backupData = "{\"vaultId\":\"VLT-TEST\",\"items\":5}".toByteArray(Charsets.UTF_8)
+        val backupPass = "admin_backup_pass"
+        val encryptedBackup = CryptoManager.encryptBackupArchive(backupData, backupPass)
+
+        // 1. Test header corruption
+        val tamperedHeader = encryptedBackup.clone()
+        tamperedHeader[0] = 'X'.code.toByte()
+        assertFalse(CryptoManager.isBackupPayload(tamperedHeader))
+        try {
+            CryptoManager.decryptBackupArchive(tamperedHeader, backupPass)
+            fail("Tampered backup header must be rejected")
+        } catch (_: CryptoException) {
+            assertTrue(true)
+        }
+
+        // 2. Test ciphertext tampering (GCM AEAD Tag verification failure)
+        val tamperedCipher = encryptedBackup.clone()
+        tamperedCipher[tamperedCipher.size - 2] = (tamperedCipher[tamperedCipher.size - 2] + 1).toByte()
+        try {
+            CryptoManager.decryptBackupArchive(tamperedCipher, backupPass)
+            fail("Tampered backup payload tag verification must throw CryptoException")
+        } catch (_: CryptoException) {
+            assertTrue(true)
+        }
+    }
+
+    @Test
+    fun testBiometricKeyEnvelopeSimulation() {
+        // Simulates Android Keystore hardware key wrapping the 256-bit Master Vault Key
+        val masterKey = CryptoManager.generateMasterKey()
+        val simulatedHardwareKey = ByteArray(32).apply { java.security.SecureRandom().nextBytes(this) }
+        val iv = ByteArray(12).apply { java.security.SecureRandom().nextBytes(this) }
+
+        val wrapCipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+        wrapCipher.init(javax.crypto.Cipher.ENCRYPT_MODE, javax.crypto.spec.SecretKeySpec(simulatedHardwareKey, "AES"), javax.crypto.spec.GCMParameterSpec(128, iv))
+        val wrappedMasterKey = wrapCipher.doFinal(masterKey)
+
+        assertFalse(wrappedMasterKey.contentEquals(masterKey))
+
+        // Unwrap on biometric callback success
+        val unwrapCipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+        unwrapCipher.init(javax.crypto.Cipher.DECRYPT_MODE, javax.crypto.spec.SecretKeySpec(simulatedHardwareKey, "AES"), javax.crypto.spec.GCMParameterSpec(128, iv))
+        val unwrappedKey = unwrapCipher.doFinal(wrappedMasterKey)
+
+        assertArrayEquals(masterKey, unwrappedKey)
+    }
+
+    @Test
+    fun testMediaEntityVideoAndPhotoMetadataIntegrity() {
+        val photo = com.example.data.PhotoEntity(
+            id = 1L,
+            title = "Sunset.jpg",
+            localUri = "content://media/external/images/media/55",
+            localFilePath = "/data/user/0/app/gallery/sunset.jpg",
+            cloudUrl = null,
+            uploadStatus = "LOCAL_ONLY",
+            syncStatus = com.example.data.PhotoEntity.SYNC_STATUS_LOCAL_ONLY,
+            isEncrypted = false,
+            fileSizeBytes = 2048500L,
+            mimeType = "image/jpeg",
+            createdAt = 1700000000000L,
+            album = "Vacation",
+            isOfflineAvailable = true,
+            isVideo = false,
+            durationMs = 0L
+        )
+        assertFalse(photo.isVideo)
+        assertEquals(0L, photo.durationMs)
+        assertEquals("00:00", com.example.ui.util.DateUtils.formatDuration(photo.durationMs))
+
+        val video = photo.copy(
+            id = 2L,
+            title = "FamilyVideo.mp4",
+            mimeType = "video/mp4",
+            isVideo = true,
+            durationMs = 125000L // 2 minutes 5 seconds
+        )
+        assertTrue(video.isVideo)
+        assertEquals(125000L, video.durationMs)
+        assertEquals("02:05", com.example.ui.util.DateUtils.formatDuration(video.durationMs))
+    }
+
+    @Test
+    fun testPermissionMatrixLogicForAndroidVersions() {
+        fun requiredPermissions(sdkInt: Int): List<String> {
+            return when {
+                sdkInt >= 34 -> listOf(
+                    "android.permission.READ_MEDIA_IMAGES",
+                    "android.permission.READ_MEDIA_VIDEO",
+                    "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+                )
+                sdkInt >= 33 -> listOf(
+                    "android.permission.READ_MEDIA_IMAGES",
+                    "android.permission.READ_MEDIA_VIDEO"
+                )
+                else -> listOf(
+                    "android.permission.READ_EXTERNAL_STORAGE"
+                )
+            }
+        }
+
+        val permsApi29 = requiredPermissions(29)
+        assertEquals(1, permsApi29.size)
+        assertTrue(permsApi29.contains("android.permission.READ_EXTERNAL_STORAGE"))
+
+        val permsApi33 = requiredPermissions(33)
+        assertEquals(2, permsApi33.size)
+        assertTrue(permsApi33.contains("android.permission.READ_MEDIA_IMAGES"))
+        assertTrue(permsApi33.contains("android.permission.READ_MEDIA_VIDEO"))
+
+        val permsApi34 = requiredPermissions(34)
+        assertEquals(3, permsApi34.size)
+        assertTrue(permsApi34.contains("android.permission.READ_MEDIA_VISUAL_USER_SELECTED"))
+    }
 }

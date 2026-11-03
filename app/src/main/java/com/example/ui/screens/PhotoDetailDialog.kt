@@ -55,9 +55,18 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.filled.OpenInBrowser
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Pause
+import android.widget.VideoView
+import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.delay
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -364,7 +373,13 @@ fun PhotoDetailDialog(
                     .transformable(state = transformState),
                 contentAlignment = Alignment.Center
             ) {
-                if (photo.isEncrypted) {
+                if (photo.isVideo) {
+                    VideoPlaybackView(
+                        photo = photo,
+                        viewModel = viewModel,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else if (photo.isEncrypted) {
                     if (decryptedBitmap != null) {
                         Image(
                             bitmap = decryptedBitmap.asImageBitmap(),
@@ -940,6 +955,213 @@ fun PhotoDetailDialog(
                         Spacer(modifier = Modifier.height(24.dp))
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VideoPlaybackView(
+    photo: PhotoEntity,
+    viewModel: GalleryViewModel,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    var isPlaying by remember { mutableStateOf(false) }
+    var currentPositionMs by remember { mutableIntStateOf(0) }
+    var durationMs by remember { mutableIntStateOf(photo.durationMs.toInt()) }
+    var tempVideoFile by remember { mutableStateOf<File?>(null) }
+    var isDecrypting by remember { mutableStateOf(photo.isEncrypted) }
+    var videoViewRef by remember { mutableStateOf<VideoView?>(null) }
+    var decryptionFailed by remember { mutableStateOf(false) }
+
+    LaunchedEffect(photo.id) {
+        if (photo.isEncrypted) {
+            isDecrypting = true
+            val file = viewModel.decryptToTempPlaybackFile(photo)
+            if (file != null && file.exists()) {
+                tempVideoFile = file
+                isDecrypting = false
+            } else {
+                isDecrypting = false
+                decryptionFailed = true
+            }
+        }
+    }
+
+    DisposableEffect(photo.id) {
+        onDispose {
+            videoViewRef?.stopPlayback()
+            tempVideoFile?.delete()
+        }
+    }
+
+    // Video playback progress polling loop
+    LaunchedEffect(isPlaying) {
+        while (isPlaying) {
+            videoViewRef?.let { vv ->
+                if (vv.isPlaying) {
+                    currentPositionMs = vv.currentPosition
+                    if (durationMs <= 0 && vv.duration > 0) {
+                        durationMs = vv.duration
+                    }
+                }
+            }
+            delay(250)
+        }
+    }
+
+    val videoUri = remember(tempVideoFile, photo) {
+        when {
+            photo.isEncrypted -> tempVideoFile?.let { Uri.fromFile(it) }
+            photo.localFilePath != null -> Uri.fromFile(File(photo.localFilePath))
+            else -> try { Uri.parse(photo.localUri) } catch (_: Exception) { null }
+        }
+    }
+
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        when {
+            isDecrypting -> {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = AccentGold)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Decrypting secure video...", color = TextPrimary, fontSize = 13.sp)
+                }
+            }
+            decryptionFailed -> {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = null,
+                        tint = AccentRose,
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Vault locked. Authenticate to play video.", color = TextPrimary, fontSize = 14.sp)
+                }
+            }
+            videoUri != null -> {
+                AndroidView(
+                    factory = { ctx ->
+                        VideoView(ctx).apply {
+                            setVideoURI(videoUri)
+                            setOnPreparedListener { mp ->
+                                mp.isLooping = true
+                                if (durationMs <= 0) durationMs = mp.duration
+                            }
+                            setOnCompletionListener {
+                                isPlaying = false
+                            }
+                            videoViewRef = this
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                // Play / Pause central button overlay when paused
+                if (!isPlaying) {
+                    Box(
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.65f))
+                            .clickable {
+                                videoViewRef?.start()
+                                isPlaying = true
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = "Play Video",
+                            tint = Color.White,
+                            modifier = Modifier.size(44.dp)
+                        )
+                    }
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clickable {
+                                videoViewRef?.pause()
+                                isPlaying = false
+                            }
+                    )
+                }
+
+                // In-player video progress and scrub bar
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 96.dp, start = 16.dp, end = 16.dp)
+                        .liquidGlass(
+                            shape = RoundedCornerShape(18.dp),
+                            tint = Color(0xFF141724),
+                            tintAlpha = 0.88f,
+                            borderAlpha = 0.4f
+                        )
+                        .padding(horizontal = 14.dp, vertical = 6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        IconButton(
+                            onClick = {
+                                if (isPlaying) {
+                                    videoViewRef?.pause()
+                                    isPlaying = false
+                                } else {
+                                    videoViewRef?.start()
+                                    isPlaying = true
+                                }
+                            },
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = if (isPlaying) "Pause" else "Play",
+                                tint = AccentGold,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+
+                        Text(
+                            text = DateUtils.formatDuration(currentPositionMs.toLong()),
+                            color = TextSecondary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+
+                        val safeDuration = if (durationMs > 0) durationMs else 1
+                        Slider(
+                            value = (currentPositionMs.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f),
+                            onValueChange = { fraction ->
+                                val target = (fraction * safeDuration).toInt()
+                                currentPositionMs = target
+                                videoViewRef?.seekTo(target)
+                            },
+                            colors = SliderDefaults.colors(
+                                thumbColor = AccentGold,
+                                activeTrackColor = AccentGold,
+                                inactiveTrackColor = Color.White.copy(alpha = 0.2f)
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+
+                        Text(
+                            text = DateUtils.formatDuration(durationMs.toLong()),
+                            color = TextSecondary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+            else -> {
+                Text("Unable to open video", color = AccentRose)
             }
         }
     }

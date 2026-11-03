@@ -603,6 +603,10 @@ class GalleryViewModel(
         }
     }
 
+    suspend fun decryptToTempPlaybackFile(photo: PhotoEntity): java.io.File? {
+        return repository.decryptToTempPlaybackFile(photo)
+    }
+
     fun toggleVaultProtection(photo: PhotoEntity, pin: String? = null) {
         if (!photo.isEncrypted && !vaultManager.hasAccount()) {
             _statusMessage.value = "Create a Vault Account first to encrypt photos!"
