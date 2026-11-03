@@ -5,6 +5,8 @@ data class VaultAccount(
     val userName: String,
     val passwordHash: String,
     val saltHex: String,
-    val createdAt: Long,
+    val wrappedMasterKeyHex: String = "",
+    val keystoreWrappedMasterKeyHex: String? = null,
+    val createdAt: Long = System.currentTimeMillis(),
     val isBiometricEnabled: Boolean = true
 )

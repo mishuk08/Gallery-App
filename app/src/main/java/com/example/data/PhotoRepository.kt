@@ -3,8 +3,12 @@ package com.example.data
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
+import android.util.Size
 import com.example.R
+import com.example.crypto.CryptoException
 import com.example.crypto.CryptoManager
 import com.example.network.CloudUploadService
 import kotlinx.coroutines.Dispatchers
@@ -38,9 +42,8 @@ class PhotoRepository(
     }
 
     /**
-     * Synchronizes device photos into the Room database.
-     * Indexes each device photo's metadata and sets syncStatus = "LOCAL_ONLY"
-     * so that the gallery can operate completely offline-first without re-querying MediaStore.
+     * Synchronizes device photos and videos into the Room database.
+     * Prevents duplicates and maintains offline-first indexing.
      */
     suspend fun syncDevicePhotosToDatabase(mediaPhotos: List<LocalMediaPhoto>) = withContext(Dispatchers.IO) {
         val newEntities = mutableListOf<PhotoEntity>()
@@ -51,7 +54,7 @@ class PhotoRepository(
                 newEntities.add(
                     PhotoEntity(
                         title = media.displayName,
-                        description = "Device MediaStore Image",
+                        description = if (media.isVideo) "Device Video" else "Device Image",
                         localUri = media.contentUri,
                         localFilePath = null,
                         cloudUrl = null,
@@ -63,7 +66,9 @@ class PhotoRepository(
                         createdAt = media.dateAdded,
                         album = media.bucketName,
                         isOfflineAvailable = true,
-                        deviceMediaId = media.id
+                        deviceMediaId = media.id,
+                        isVideo = media.isVideo,
+                        durationMs = media.durationMs
                     )
                 )
             }
@@ -74,20 +79,35 @@ class PhotoRepository(
     }
 
     /**
-     * Imports an image from a URI (from device photo picker or documents).
+     * Imports an image or video from a URI into Gallery or Encrypted Vault.
      */
     suspend fun importPhoto(
         uri: Uri,
         title: String,
         description: String = "",
         isEncrypted: Boolean = false,
-        autoUploadToCloud: Boolean = true,
+        autoUploadToCloud: Boolean = false,
         pin: String? = null
     ): PhotoEntity = withContext(Dispatchers.IO) {
         val contentResolver = context.contentResolver
         val mimeType = contentResolver.getType(uri) ?: "image/jpeg"
         val rawBytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            ?: throw IllegalArgumentException("Could not read image data from device. Please try another photo.")
+            ?: throw IllegalArgumentException("Could not read media data from device.")
+
+        val isVideo = mimeType.startsWith("video/")
+        val durationMs = if (isVideo) {
+            try {
+                val retriever = MediaMetadataRetriever()
+                retriever.setDataSource(context, uri)
+                val durStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                retriever.release()
+                durStr?.toLongOrNull() ?: 0L
+            } catch (_: Exception) {
+                0L
+            }
+        } else {
+            0L
+        }
 
         importRawBytes(
             rawBytes = rawBytes,
@@ -97,12 +117,15 @@ class PhotoRepository(
             mimeType = mimeType,
             isEncrypted = isEncrypted,
             autoUploadToCloud = autoUploadToCloud,
-            pin = pin
+            pin = pin,
+            isVideo = isVideo,
+            durationMs = durationMs
         )
     }
 
     /**
-     * Imports raw image bytes directly (supports sample photos, URLs, and file picker).
+     * Imports raw bytes directly into Gallery or Encrypted Vault.
+     * Enforces Master Vault Key encryption and verification before file persistence.
      */
     suspend fun importRawBytes(
         rawBytes: ByteArray,
@@ -111,8 +134,10 @@ class PhotoRepository(
         description: String = "",
         mimeType: String = "image/jpeg",
         isEncrypted: Boolean = false,
-        autoUploadToCloud: Boolean = true,
-        pin: String? = null
+        autoUploadToCloud: Boolean = false,
+        pin: String? = null,
+        isVideo: Boolean = false,
+        durationMs: Long = 0L
     ): PhotoEntity = withContext(Dispatchers.IO) {
         if (pin != null) {
             if (!vaultManager.hasAccount()) {
@@ -122,16 +147,31 @@ class PhotoRepository(
             }
         }
 
+        val masterKey: ByteArray? = if (isEncrypted) {
+            vaultManager.getActiveMasterKey()
+                ?: throw IllegalStateException("Vault is locked! Please authenticate.")
+        } else {
+            null
+        }
+
         val subDir = if (isEncrypted) "vault" else "gallery"
         val dir = File(context.filesDir, subDir).apply { mkdirs() }
-        val ext = if (isEncrypted) "vlt" else if (mimeType.contains("png")) "png" else "jpg"
-        val fileName = "photo_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}.$ext"
+        val ext = when {
+            isEncrypted -> "vlt"
+            isVideo -> "mp4"
+            mimeType.contains("png") -> "png"
+            else -> "jpg"
+        }
+        val fileName = "media_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}.$ext"
         val localFile = File(dir, fileName)
 
-        val finalBytes = if (isEncrypted) {
-            val activePin = pin ?: vaultManager.getActivePin()
-                ?: throw IllegalStateException("Vault is locked! Please enter your master PIN.")
-            CryptoManager.encryptBytes(rawBytes, activePin)
+        val finalBytes = if (isEncrypted && masterKey != null) {
+            val encrypted = CryptoManager.encryptWithMasterKey(rawBytes, masterKey)
+            // Verify encryption header before committing
+            if (!CryptoManager.isEncryptedPayload(encrypted)) {
+                throw IllegalStateException("Encryption verification failed.")
+            }
+            encrypted
         } else {
             rawBytes
         }
@@ -142,7 +182,7 @@ class PhotoRepository(
         val initialSyncStatus = if (autoUploadToCloud) PhotoEntity.SYNC_STATUS_PENDING else PhotoEntity.SYNC_STATUS_LOCAL_ONLY
 
         val entity = PhotoEntity(
-            title = title.ifBlank { "Photo ${System.currentTimeMillis() % 10000}" },
+            title = title.ifBlank { if (isVideo) "Video ${System.currentTimeMillis() % 10000}" else "Photo ${System.currentTimeMillis() % 10000}" },
             description = description,
             localUri = uriString.ifBlank { localFile.toURI().toString() },
             localFilePath = localFile.absolutePath,
@@ -153,8 +193,10 @@ class PhotoRepository(
             fileSizeBytes = finalBytes.size.toLong(),
             mimeType = if (isEncrypted) "application/octet-stream" else mimeType,
             createdAt = System.currentTimeMillis(),
-            album = if (isEncrypted) activeVaultId else "All",
-            isOfflineAvailable = true
+            album = if (isEncrypted) activeVaultId else if (isVideo) "Videos" else "All",
+            isOfflineAvailable = true,
+            isVideo = isVideo,
+            durationMs = durationMs
         )
 
         val id = photoDao.insertPhoto(entity)
@@ -167,9 +209,6 @@ class PhotoRepository(
         savedEntity
     }
 
-    /**
-     * Creates and imports a sample demo photo (useful for testing on fresh emulators).
-     */
     suspend fun importSamplePhoto(
         isEncrypted: Boolean = false,
         autoUploadToCloud: Boolean = false,
@@ -183,17 +222,191 @@ class PhotoRepository(
         importRawBytes(
             rawBytes = bytes,
             title = sampleTitle,
-            description = if (isEncrypted) "Encrypted demo with AES-256" else "Gallery demo photo",
+            description = if (isEncrypted) "Encrypted demo with AES-256-GCM" else "Gallery demo photo",
             mimeType = "image/jpeg",
             isEncrypted = isEncrypted,
             autoUploadToCloud = autoUploadToCloud,
-            pin = pin
+            pin = pin,
+            isVideo = false,
+            durationMs = 0L
         )
     }
 
     /**
-     * Uploads the photo (standard or encrypted) to cloud storage and updates Room sync status.
+     * Decrypts and loads a vault photo or video thumbnail as a Bitmap.
      */
+    suspend fun loadDecryptedBitmap(photo: PhotoEntity, pinOverride: String? = null): Bitmap? = withContext(Dispatchers.IO) {
+        if (!photo.isEncrypted) {
+            return@withContext loadPlainBitmap(photo)
+        }
+
+        val masterKey = vaultManager.getActiveMasterKey()
+        val fallbackPin = pinOverride ?: vaultManager.getActivePin()
+
+        if (masterKey == null && fallbackPin == null) {
+            return@withContext null
+        }
+
+        val encryptedBytes: ByteArray? = photo.localFilePath?.let { path ->
+            val file = File(path)
+            if (file.exists()) file.readBytes() else null
+        } ?: photo.cloudUrl?.let { url ->
+            CloudUploadService.downloadBytes(url)
+        }
+
+        if (encryptedBytes == null) return@withContext null
+
+        try {
+            val effectiveMasterKey = masterKey ?: CryptoManager.generateMasterKey()
+            val decryptedBytes = CryptoManager.decryptMedia(encryptedBytes, effectiveMasterKey, fallbackPin)
+
+            if (photo.isVideo) {
+                // Extract frame from decrypted video bytes via temporary cache file
+                extractVideoThumbnail(decryptedBytes)
+            } else {
+                BitmapFactory.decodeByteArray(decryptedBytes, 0, decryptedBytes.size)
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    suspend fun loadPlainBitmap(photo: PhotoEntity): Bitmap? = withContext(Dispatchers.IO) {
+        if (photo.isVideo) {
+            return@withContext loadVideoThumbnail(photo)
+        }
+
+        photo.localFilePath?.let { path ->
+            val file = File(path)
+            if (file.exists()) {
+                BitmapFactory.decodeFile(file.absolutePath)?.let { return@withContext it }
+            }
+        }
+
+        try {
+            context.contentResolver.openInputStream(Uri.parse(photo.localUri))?.use {
+                BitmapFactory.decodeStream(it)?.let { bmp -> return@withContext bmp }
+            }
+        } catch (_: Exception) {}
+
+        photo.cloudUrl?.let { url ->
+            val bytes = CloudUploadService.downloadBytes(url)
+            if (bytes != null) {
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.let { return@withContext it }
+            }
+        }
+
+        null
+    }
+
+    private fun loadVideoThumbnail(photo: PhotoEntity): Bitmap? {
+        return try {
+            val uri = Uri.parse(photo.localUri)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                context.contentResolver.loadThumbnail(uri, Size(512, 512), null)
+            } else {
+                val retriever = MediaMetadataRetriever()
+                retriever.setDataSource(context, uri)
+                val frame = retriever.frameAtTime
+                retriever.release()
+                frame
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun extractVideoThumbnail(videoBytes: ByteArray): Bitmap? {
+        val tempFile = File.createTempFile("v_thumb_", ".mp4", context.cacheDir)
+        return try {
+            FileOutputStream(tempFile).use { it.write(videoBytes) }
+            val retriever = MediaMetadataRetriever()
+            retriever.setDataSource(tempFile.absolutePath)
+            val frame = retriever.frameAtTime
+            retriever.release()
+            frame
+        } catch (_: Exception) {
+            null
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    /**
+     * Toggles encryption between Vault and Public Gallery.
+     */
+    suspend fun toggleVaultProtection(photo: PhotoEntity, pinOverride: String? = null): Boolean = withContext(Dispatchers.IO) {
+        val masterKey = vaultManager.getActiveMasterKey()
+        val pin = pinOverride ?: vaultManager.getActivePin()
+
+        if (masterKey == null && pin == null) return@withContext false
+
+        if (photo.isEncrypted) {
+            // Move from Vault -> Public Gallery (Decrypt)
+            val encryptedBytes = photo.localFilePath?.let { File(it).readBytes() } ?: return@withContext false
+            val decryptedBytes = try {
+                val effectiveMasterKey = masterKey ?: CryptoManager.generateMasterKey()
+                CryptoManager.decryptMedia(encryptedBytes, effectiveMasterKey, pin)
+            } catch (_: Exception) {
+                return@withContext false
+            }
+
+            val dir = File(context.filesDir, "gallery").apply { mkdirs() }
+            val ext = if (photo.isVideo) "mp4" else "jpg"
+            val newFile = File(dir, "photo_${System.currentTimeMillis()}.$ext")
+            FileOutputStream(newFile).use { it.write(decryptedBytes) }
+
+            // Delete old encrypted file
+            photo.localFilePath?.let { File(it).delete() }
+
+            val updated = photo.copy(
+                isEncrypted = false,
+                localUri = Uri.fromFile(newFile).toString(),
+                localFilePath = newFile.absolutePath,
+                fileSizeBytes = newFile.length(),
+                mimeType = if (photo.isVideo) "video/mp4" else "image/jpeg",
+                uploadStatus = "LOCAL_ONLY",
+                syncStatus = PhotoEntity.SYNC_STATUS_LOCAL_ONLY,
+                cloudUrl = null,
+                album = if (photo.isVideo) "Videos" else "All"
+            )
+            photoDao.updatePhoto(updated)
+            true
+        } else {
+            // Move from Public Gallery -> Vault (Encrypt)
+            val rawBytes = photo.localFilePath?.let { File(it).readBytes() }
+                ?: try {
+                    context.contentResolver.openInputStream(Uri.parse(photo.localUri))?.use { it.readBytes() }
+                } catch (_: Exception) { null }
+                ?: return@withContext false
+
+            val effectiveMasterKey = masterKey ?: return@withContext false
+            val encryptedBytes = CryptoManager.encryptWithMasterKey(rawBytes, effectiveMasterKey)
+
+            val dir = File(context.filesDir, "vault").apply { mkdirs() }
+            val newFile = File(dir, "vault_${System.currentTimeMillis()}.vlt")
+            FileOutputStream(newFile).use { it.write(encryptedBytes) }
+
+            // Delete old plaintext file
+            photo.localFilePath?.let { File(it).delete() }
+
+            val activeVaultId = vaultManager.account.value?.vaultId ?: "Vault"
+            val updated = photo.copy(
+                isEncrypted = true,
+                localUri = Uri.fromFile(newFile).toString(),
+                localFilePath = newFile.absolutePath,
+                fileSizeBytes = encryptedBytes.size.toLong(),
+                mimeType = "application/octet-stream",
+                uploadStatus = "LOCAL_ONLY",
+                syncStatus = PhotoEntity.SYNC_STATUS_LOCAL_ONLY,
+                cloudUrl = null,
+                album = activeVaultId
+            )
+            photoDao.updatePhoto(updated)
+            true
+        }
+    }
+
     suspend fun uploadToCloud(
         photo: PhotoEntity,
         onProgress: (Int) -> Unit = {}
@@ -212,7 +425,7 @@ class PhotoRepository(
             else -> {
                 try {
                     context.contentResolver.openInputStream(Uri.parse(photo.localUri))?.use { it.readBytes() }
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     null
                 }
             }
@@ -230,7 +443,9 @@ class PhotoRepository(
         }
 
         val uploadFileName = if (photo.isEncrypted) {
-            "vault_${photo.id}_${System.currentTimeMillis()}.bin"
+            "vault_${photo.id}_${System.currentTimeMillis()}.vlt"
+        } else if (photo.isVideo) {
+            "vid_${photo.id}_${System.currentTimeMillis()}.mp4"
         } else {
             "img_${photo.id}_${System.currentTimeMillis()}.jpg"
         }
@@ -258,120 +473,6 @@ class PhotoRepository(
                 )
                 false
             }
-        }
-    }
-
-    /**
-     * Decrypt and load a vault photo as a Bitmap.
-     */
-    suspend fun loadDecryptedBitmap(photo: PhotoEntity, pinOverride: String? = null): Bitmap? = withContext(Dispatchers.IO) {
-        if (!photo.isEncrypted) {
-            return@withContext loadPlainBitmap(photo)
-        }
-
-        val pin = pinOverride ?: vaultManager.getActivePin() ?: return@withContext null
-
-        val encryptedBytes: ByteArray? = photo.localFilePath?.let { path ->
-            val file = File(path)
-            if (file.exists()) file.readBytes() else null
-        } ?: photo.cloudUrl?.let { url ->
-            CloudUploadService.downloadBytes(url)
-        }
-
-        if (encryptedBytes == null) return@withContext null
-
-        try {
-            val decryptedBytes = CryptoManager.decryptBytes(encryptedBytes, pin)
-            BitmapFactory.decodeByteArray(decryptedBytes, 0, decryptedBytes.size)
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    suspend fun loadPlainBitmap(photo: PhotoEntity): Bitmap? = withContext(Dispatchers.IO) {
-        photo.localFilePath?.let { path ->
-            val file = File(path)
-            if (file.exists()) {
-                BitmapFactory.decodeFile(file.absolutePath)?.let { return@withContext it }
-            }
-        }
-
-        try {
-            context.contentResolver.openInputStream(Uri.parse(photo.localUri))?.use {
-                BitmapFactory.decodeStream(it)?.let { bmp -> return@withContext bmp }
-            }
-        } catch (_: Exception) {}
-
-        photo.cloudUrl?.let { url ->
-            val bytes = CloudUploadService.downloadBytes(url)
-            if (bytes != null) {
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.let { return@withContext it }
-            }
-        }
-
-        null
-    }
-
-    /**
-     * Move photo to Vault (encrypt) or out of Vault (decrypt).
-     */
-    suspend fun toggleVaultProtection(photo: PhotoEntity, pinOverride: String? = null): Boolean = withContext(Dispatchers.IO) {
-        val pin = pinOverride ?: vaultManager.getActivePin() ?: return@withContext false
-
-        if (photo.isEncrypted) {
-            // Move from Vault -> Public Gallery (Decrypt)
-            val decryptedBmp = loadDecryptedBitmap(photo, pin) ?: return@withContext false
-            val dir = File(context.filesDir, "gallery").apply { mkdirs() }
-            val newFile = File(dir, "photo_${System.currentTimeMillis()}.jpg")
-            FileOutputStream(newFile).use { out ->
-                decryptedBmp.compress(Bitmap.CompressFormat.JPEG, 95, out)
-            }
-            // Delete old encrypted file
-            photo.localFilePath?.let { File(it).delete() }
-
-            val updated = photo.copy(
-                isEncrypted = false,
-                localFilePath = newFile.absolutePath,
-                fileSizeBytes = newFile.length(),
-                mimeType = "image/jpeg",
-                uploadStatus = "PENDING",
-                syncStatus = PhotoEntity.SYNC_STATUS_PENDING,
-                cloudUrl = null,
-                album = "All"
-            )
-            photoDao.updatePhoto(updated)
-            uploadToCloud(updated)
-            true
-        } else {
-            // Move from Public Gallery -> Vault (Encrypt)
-            val rawBytes = photo.localFilePath?.let { File(it).readBytes() }
-                ?: try {
-                    context.contentResolver.openInputStream(Uri.parse(photo.localUri))?.use { it.readBytes() }
-                } catch (e: Exception) { null }
-                ?: return@withContext false
-
-            val encryptedBytes = CryptoManager.encryptBytes(rawBytes, pin)
-            val dir = File(context.filesDir, "vault").apply { mkdirs() }
-            val newFile = File(dir, "vault_${System.currentTimeMillis()}.vlt")
-            FileOutputStream(newFile).use { it.write(encryptedBytes) }
-
-            // Delete old plaintext file
-            photo.localFilePath?.let { File(it).delete() }
-
-            val activeVaultId = vaultManager.account.value?.vaultId ?: "Vault"
-            val updated = photo.copy(
-                isEncrypted = true,
-                localFilePath = newFile.absolutePath,
-                fileSizeBytes = encryptedBytes.size.toLong(),
-                mimeType = "application/octet-stream",
-                uploadStatus = "PENDING",
-                syncStatus = PhotoEntity.SYNC_STATUS_PENDING,
-                cloudUrl = null,
-                album = activeVaultId
-            )
-            photoDao.updatePhoto(updated)
-            uploadToCloud(updated)
-            true
         }
     }
 

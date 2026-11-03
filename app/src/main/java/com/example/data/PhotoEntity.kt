@@ -10,7 +10,8 @@ import androidx.room.PrimaryKey
         Index(value = ["localUri"]),
         Index(value = ["syncStatus"]),
         Index(value = ["isEncrypted"]),
-        Index(value = ["createdAt"])
+        Index(value = ["createdAt"]),
+        Index(value = ["deviceMediaId"])
     ]
 )
 data class PhotoEntity(
@@ -33,7 +34,9 @@ data class PhotoEntity(
     val width: Int = 0,
     val height: Int = 0,
     val isOfflineAvailable: Boolean = true,
-    val deviceMediaId: Long? = null
+    val deviceMediaId: Long? = null,
+    val isVideo: Boolean = false,
+    val durationMs: Long = 0L
 ) {
     companion object {
         const val SYNC_STATUS_LOCAL_ONLY = "LOCAL_ONLY"

@@ -7,5 +7,7 @@ data class LocalMediaPhoto(
     val dateAdded: Long,
     val sizeBytes: Long,
     val bucketName: String,
-    val mimeType: String
+    val mimeType: String,
+    val isVideo: Boolean = mimeType.startsWith("video/"),
+    val durationMs: Long = 0L
 )

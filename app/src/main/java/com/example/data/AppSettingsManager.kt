@@ -139,6 +139,47 @@ class AppSettingsManager(context: Context) {
         prefs.edit().putBoolean(KEY_IS_FIRST_LAUNCH, false).apply()
     }
 
+    /**
+     * Rate-limiting and temporary lockout for PIN verification.
+     */
+    fun getLockoutRemainingSeconds(): Long {
+        val lockoutUntil = prefs.getLong(KEY_PIN_LOCKOUT_UNTIL, 0L)
+        val now = System.currentTimeMillis()
+        return if (lockoutUntil > now) {
+            (lockoutUntil - now + 999) / 1000
+        } else {
+            0L
+        }
+    }
+
+    fun isLockedOut(): Boolean = getLockoutRemainingSeconds() > 0
+
+    fun recordFailedPinAttempt(): Long {
+        val attempts = prefs.getInt(KEY_FAILED_PIN_ATTEMPTS, 0) + 1
+        val editor = prefs.edit().putInt(KEY_FAILED_PIN_ATTEMPTS, attempts)
+        val now = System.currentTimeMillis()
+
+        val lockoutSeconds = when {
+            attempts >= 7 -> 120L
+            attempts >= 6 -> 60L
+            attempts >= 5 -> 30L
+            else -> 0L
+        }
+
+        if (lockoutSeconds > 0) {
+            editor.putLong(KEY_PIN_LOCKOUT_UNTIL, now + (lockoutSeconds * 1000L))
+        }
+        editor.apply()
+        return lockoutSeconds
+    }
+
+    fun resetFailedPinAttempts() {
+        prefs.edit()
+            .putInt(KEY_FAILED_PIN_ATTEMPTS, 0)
+            .putLong(KEY_PIN_LOCKOUT_UNTIL, 0L)
+            .apply()
+    }
+
     companion object {
         private const val KEY_IS_FIRST_LAUNCH = "is_first_launch_v2"
         private const val KEY_GRID_COLUMNS = "grid_columns"
@@ -149,5 +190,7 @@ class AppSettingsManager(context: Context) {
         private const val KEY_APP_LOCK = "app_lock_biometrics_enabled"
         private const val KEY_APP_LOCK_PIN_HASH = "app_lock_pin_hash_v2"
         private const val KEY_APP_LOCK_PIN_SALT = "app_lock_pin_salt_v2"
+        private const val KEY_FAILED_PIN_ATTEMPTS = "failed_pin_attempts_count"
+        private const val KEY_PIN_LOCKOUT_UNTIL = "pin_lockout_until_timestamp"
     }
 }

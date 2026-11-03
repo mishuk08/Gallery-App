@@ -2,7 +2,9 @@ package com.example.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.example.crypto.CryptoException
 import com.example.crypto.CryptoManager
+import com.example.crypto.KeystoreHelper
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -10,9 +12,10 @@ import org.json.JSONObject
 import java.security.SecureRandom
 import java.util.Locale
 
-class VaultManager(context: Context) {
+class VaultManager(private val context: Context) {
     private val prefs: SharedPreferences =
         context.getSharedPreferences("secure_vault_prefs", Context.MODE_PRIVATE)
+    private val settingsManager = AppSettingsManager(context)
 
     private val _isUnlocked = MutableStateFlow(false)
     val isUnlocked: StateFlow<Boolean> = _isUnlocked.asStateFlow()
@@ -20,16 +23,18 @@ class VaultManager(context: Context) {
     private val _account = MutableStateFlow<VaultAccount?>(null)
     val account: StateFlow<VaultAccount?> = _account.asStateFlow()
 
-    private var activePassword: String? = null
+    // In-memory active Master Vault Key (256-bit AES key)
+    // NEVER persisted in plaintext to disk
+    private var activeMasterKey: ByteArray? = null
+
+    // Session-only cached PIN (cleared on lock)
+    private var activePin: String? = null
 
     init {
         migrateLegacyAccountIfNeeded()
         _account.value = loadActiveAccount()
     }
 
-    /**
-     * Load all registered accounts from the persistent local accounts registry.
-     */
     fun getAllAccounts(): Map<String, VaultAccount> {
         val jsonStr = prefs.getString(KEY_ACCOUNTS_MAP_JSON, null) ?: return emptyMap()
         val result = mutableMapOf<String, VaultAccount>()
@@ -44,6 +49,10 @@ class VaultManager(context: Context) {
                     userName = obj.optString("userName", "Vault Owner"),
                     passwordHash = obj.getString("passwordHash"),
                     saltHex = obj.getString("saltHex"),
+                    wrappedMasterKeyHex = obj.optString("wrappedMasterKeyHex", ""),
+                    keystoreWrappedMasterKeyHex = if (obj.has("keystoreWrappedMasterKeyHex") && !obj.isNull("keystoreWrappedMasterKeyHex")) {
+                        obj.getString("keystoreWrappedMasterKeyHex")
+                    } else null,
                     createdAt = obj.optLong("createdAt", System.currentTimeMillis()),
                     isBiometricEnabled = obj.optBoolean("isBiometricEnabled", true)
                 )
@@ -54,7 +63,7 @@ class VaultManager(context: Context) {
         return result
     }
 
-    private fun saveAllAccounts(accounts: Map<String, VaultAccount>) {
+    fun saveAllAccounts(accounts: Map<String, VaultAccount>) {
         try {
             val root = JSONObject()
             for ((id, acc) in accounts) {
@@ -62,6 +71,10 @@ class VaultManager(context: Context) {
                     put("userName", acc.userName)
                     put("passwordHash", acc.passwordHash)
                     put("saltHex", acc.saltHex)
+                    put("wrappedMasterKeyHex", acc.wrappedMasterKeyHex)
+                    if (acc.keystoreWrappedMasterKeyHex != null) {
+                        put("keystoreWrappedMasterKeyHex", acc.keystoreWrappedMasterKeyHex)
+                    }
                     put("createdAt", acc.createdAt)
                     put("isBiometricEnabled", acc.isBiometricEnabled)
                 }
@@ -79,7 +92,6 @@ class VaultManager(context: Context) {
         if (activeId != null && allAccounts.containsKey(activeId)) {
             return allAccounts[activeId]
         }
-        // If no active ID specified but accounts exist, return the first one as selected
         return allAccounts.values.firstOrNull()
     }
 
@@ -98,6 +110,8 @@ class VaultManager(context: Context) {
                     userName = legacyUser,
                     passwordHash = legacyPwdHash,
                     saltHex = legacySalt,
+                    wrappedMasterKeyHex = "",
+                    keystoreWrappedMasterKeyHex = null,
                     createdAt = legacyCreated,
                     isBiometricEnabled = legacyBio
                 )
@@ -112,27 +126,48 @@ class VaultManager(context: Context) {
 
     fun isPinConfigured(): Boolean = hasAccount()
 
-    fun getActivePin(): String? = activePassword
+    fun getActivePin(): String? = activePin
+
+    fun getActiveMasterKey(): ByteArray? = activeMasterKey
 
     /**
-     * Creates a new vault account with a guaranteed globally unique ID and a strict 6-digit PIN.
+     * Creates a new vault account with a cryptographically generated Master Vault Key,
+     * wrapped using a 6-digit PIN and Android Keystore.
      */
-    fun createAccount(userName: String, passwordOrPin: String): VaultAccount {
-        require(passwordOrPin.length == 6 && passwordOrPin.all { it.isDigit() }) {
+    fun createAccount(userName: String, pin: String): VaultAccount {
+        require(pin.length == 6 && pin.all { it.isDigit() }) {
             "PIN must be exactly 6 digits"
         }
 
         val allAccounts = getAllAccounts().toMutableMap()
         val vaultId = generateUniqueVaultId(allAccounts.keys)
         val salt = CryptoManager.generateSaltHex()
-        val hash = CryptoManager.hashPin(passwordOrPin, salt)
+        val hash = CryptoManager.hashPin(pin, salt)
         val now = System.currentTimeMillis()
+
+        // 1. Generate 256-bit Master Vault Key
+        val masterKey = CryptoManager.generateMasterKey()
+
+        // 2. Wrap Master Key with PIN-derived Key-Encryption-Key (KEK)
+        val wrappedByPin = CryptoManager.wrapMasterKeyWithPin(
+            masterKey = masterKey,
+            pin = pin,
+            salt = CryptoManager.hexToBytes(salt)
+        )
+        val wrappedByPinHex = CryptoManager.bytesToHex(wrappedByPin)
+
+        // 3. Wrap Master Key with Android Keystore for biometrics
+        val keystoreAlias = "vault_master_key_$vaultId"
+        val wrappedByBio = KeystoreHelper.wrapMasterKey(keystoreAlias, masterKey)
+        val wrappedByBioHex = wrappedByBio?.let { CryptoManager.bytesToHex(it) }
 
         val newAcc = VaultAccount(
             vaultId = vaultId,
             userName = userName.trim().ifBlank { "Vault Owner" },
             passwordHash = hash,
             saltHex = salt,
+            wrappedMasterKeyHex = wrappedByPinHex,
+            keystoreWrappedMasterKeyHex = wrappedByBioHex,
             createdAt = now,
             isBiometricEnabled = true
         )
@@ -142,142 +177,164 @@ class VaultManager(context: Context) {
 
         prefs.edit()
             .putString(KEY_CURRENT_ACTIVE_VAULT_ID, vaultId)
-            // legacy fallbacks
             .putString(KEY_VAULT_ID, vaultId)
             .putString(KEY_USER_NAME, newAcc.userName)
             .putString(KEY_PWD_HASH, hash)
             .putString(KEY_SALT, salt)
             .putLong(KEY_CREATED_AT, now)
             .putBoolean(KEY_BIOMETRIC, true)
-            .putString("vault_pin_hash", hash)
-            .putString("vault_salt", salt)
             .apply()
 
         _account.value = newAcc
-        activePassword = passwordOrPin
+        activeMasterKey = masterKey
+        activePin = pin
         _isUnlocked.value = true
+        settingsManager.resetFailedPinAttempts()
         return newAcc
     }
 
     /**
-     * Log in / Restore an existing account anywhere using Name, Unique Vault ID & 6-Digit Password/PIN.
-     * Ensures strict security: if account exists, correct password is required.
-     * If accessed anywhere from a new device/phone, creates and syncs the account record locally.
+     * Verifies the 6-digit PIN, unwraps the Master Vault Key, and unlocks the session.
+     * Enforces rate-limiting and temporary lockout protection.
      */
-    fun loginWithCredentials(userName: String, vaultId: String, passwordOrPin: String): Boolean {
-        val cleanName = userName.trim()
-        val cleanInputId = vaultId.trim().uppercase(Locale.ROOT)
-        if (cleanName.isBlank() || cleanInputId.isBlank() || passwordOrPin.length != 6 || !passwordOrPin.all { it.isDigit() }) {
+    fun verifyAndUnlock(pin: String): Boolean {
+        if (pin.length != 6 || !pin.all { it.isDigit() }) return false
+
+        // Rate-limiting check
+        if (settingsManager.isLockedOut()) {
             return false
         }
 
-        val targetId = if (cleanInputId.startsWith("VLT-")) cleanInputId else "VLT-$cleanInputId"
-        val allAccounts = getAllAccounts().toMutableMap()
-        val existing = allAccounts[targetId]
+        val acc = _account.value ?: return false
+        val isValid = CryptoManager.verifyPin(pin, acc.saltHex, acc.passwordHash)
 
-        if (existing != null) {
-            // Validate password with cryptographic hash & salt
-            val testHash = CryptoManager.hashPin(passwordOrPin, existing.saltHex)
-            if (testHash != existing.passwordHash) {
-                // Incorrect password - access strictly denied
-                return false
-            }
-            // Update name if changed
-            val updated = existing.copy(userName = cleanName.ifBlank { existing.userName })
-            allAccounts[targetId] = updated
-            saveAllAccounts(allAccounts)
-            prefs.edit().putString(KEY_CURRENT_ACTIVE_VAULT_ID, targetId).apply()
-            _account.value = updated
-            activePassword = passwordOrPin
-            _isUnlocked.value = true
-            return true
+        if (!isValid) {
+            settingsManager.recordFailedPinAttempt()
+            return false
         }
 
-        // Account accessed from anywhere on this device: Register locally
-        val salt = CryptoManager.generateSaltHex()
-        val hash = CryptoManager.hashPin(passwordOrPin, salt)
-        val now = System.currentTimeMillis()
-        val newAcc = VaultAccount(
-            vaultId = targetId,
-            userName = cleanName.ifBlank { "Vault Owner" },
-            passwordHash = hash,
-            saltHex = salt,
-            createdAt = now,
-            isBiometricEnabled = true
-        )
+        // Authentication succeeded: reset failed attempts
+        settingsManager.resetFailedPinAttempts()
 
-        allAccounts[targetId] = newAcc
-        saveAllAccounts(allAccounts)
+        // Unwrap Master Key
+        val saltBytes = CryptoManager.hexToBytes(acc.saltHex)
+        val masterKey: ByteArray = if (acc.wrappedMasterKeyHex.isNotBlank()) {
+            try {
+                val wrappedBytes = CryptoManager.hexToBytes(acc.wrappedMasterKeyHex)
+                CryptoManager.unwrapMasterKeyWithPin(wrappedBytes, pin, saltBytes)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                return false
+            }
+        } else {
+            // Upgrade legacy account on-the-fly
+            val newMasterKey = CryptoManager.generateMasterKey()
+            val wrapped = CryptoManager.wrapMasterKeyWithPin(newMasterKey, pin, saltBytes)
+            val wrappedHex = CryptoManager.bytesToHex(wrapped)
 
-        prefs.edit()
-            .putString(KEY_CURRENT_ACTIVE_VAULT_ID, targetId)
-            .putString(KEY_VAULT_ID, targetId)
-            .putString(KEY_USER_NAME, newAcc.userName)
-            .putString(KEY_PWD_HASH, hash)
-            .putString(KEY_SALT, salt)
-            .putLong(KEY_CREATED_AT, now)
-            .putBoolean(KEY_BIOMETRIC, true)
-            .apply()
+            val keystoreAlias = "vault_master_key_${acc.vaultId}"
+            val wrappedBio = KeystoreHelper.wrapMasterKey(keystoreAlias, newMasterKey)
+            val wrappedBioHex = wrappedBio?.let { CryptoManager.bytesToHex(it) }
 
-        _account.value = newAcc
-        activePassword = passwordOrPin
+            val updated = acc.copy(
+                wrappedMasterKeyHex = wrappedHex,
+                keystoreWrappedMasterKeyHex = wrappedBioHex
+            )
+            val allAccounts = getAllAccounts().toMutableMap()
+            allAccounts[acc.vaultId] = updated
+            saveAllAccounts(allAccounts)
+            _account.value = updated
+            newMasterKey
+        }
+
+        activeMasterKey = masterKey
+        activePin = pin
         _isUnlocked.value = true
         return true
     }
 
     /**
-     * Fallback login with single identifier & PIN
-     */
-    fun loginWithCredentials(vaultIdOrName: String, passwordOrPin: String): Boolean {
-        val clean = vaultIdOrName.trim()
-        return loginWithCredentials(userName = clean, vaultId = clean, passwordOrPin = passwordOrPin)
-    }
-
-    /**
-     * Verify master password and unlock session.
-     */
-    fun verifyAndUnlock(passwordOrPin: String): Boolean {
-        val acc = _account.value ?: return false
-        val inputHash = CryptoManager.hashPin(passwordOrPin, acc.saltHex)
-        if (inputHash == acc.passwordHash) {
-            activePassword = passwordOrPin
-            _isUnlocked.value = true
-            return true
-        }
-        return false
-    }
-
-    /**
-     * Unlock using phone's default Biometrics (Fingerprint or Face ID).
+     * Unlocks using Biometrics by unwrapping the Master Vault Key from Android Keystore.
      */
     fun unlockWithBiometrics(): Boolean {
         val acc = _account.value ?: return false
         if (!acc.isBiometricEnabled) return false
-        activePassword = acc.passwordHash.take(16)
+
+        val keystoreAlias = "vault_master_key_${acc.vaultId}"
+        val wrappedBioHex = acc.keystoreWrappedMasterKeyHex ?: return false
+
+        val wrappedBioBytes = try {
+            CryptoManager.hexToBytes(wrappedBioHex)
+        } catch (_: Exception) {
+            return false
+        }
+
+        val unwrappedMasterKey = KeystoreHelper.unwrapMasterKey(keystoreAlias, wrappedBioBytes)
+            ?: return false
+
+        activeMasterKey = unwrappedMasterKey
+        activePin = null
         _isUnlocked.value = true
+        settingsManager.resetFailedPinAttempts()
         return true
     }
 
-    fun setBiometricEnabled(enabled: Boolean) {
-        val acc = _account.value ?: return
-        val updated = acc.copy(isBiometricEnabled = enabled)
-        val allAccounts = getAllAccounts().toMutableMap()
-        allAccounts[acc.vaultId] = updated
-        saveAllAccounts(allAccounts)
-        prefs.edit().putBoolean(KEY_BIOMETRIC, enabled).apply()
-        _account.value = updated
-    }
-
-    fun changePassword(oldPass: String, newPass: String): Boolean {
+    /**
+     * Securely changes the 6-digit PIN.
+     * Re-wraps the Master Vault Key with the new PIN so all existing encrypted
+     * photos remain 100% accessible and undamaged.
+     */
+    fun changePassword(oldPin: String, newPin: String): Boolean {
         val acc = _account.value ?: return false
-        val oldHash = CryptoManager.hashPin(oldPass, acc.saltHex)
-        if (oldHash != acc.passwordHash) return false
-        if (newPass.length != 6 || !newPass.all { it.isDigit() }) return false
+        if (settingsManager.isLockedOut()) return false
 
+        val isValid = CryptoManager.verifyPin(oldPin, acc.saltHex, acc.passwordHash)
+        if (!isValid) {
+            settingsManager.recordFailedPinAttempt()
+            return false
+        }
+        if (newPin.length != 6 || !newPin.all { it.isDigit() }) return false
+
+        val saltBytes = CryptoManager.hexToBytes(acc.saltHex)
+        val currentMasterKey = activeMasterKey ?: try {
+            if (acc.wrappedMasterKeyHex.isNotBlank()) {
+                CryptoManager.unwrapMasterKeyWithPin(
+                    CryptoManager.hexToBytes(acc.wrappedMasterKeyHex),
+                    oldPin,
+                    saltBytes
+                )
+            } else {
+                CryptoManager.generateMasterKey()
+            }
+        } catch (_: Exception) {
+            return false
+        }
+
+        // Generate new salt and verification hash for new PIN
         val newSalt = CryptoManager.generateSaltHex()
-        val newHash = CryptoManager.hashPin(newPass, newSalt)
+        val newSaltBytes = CryptoManager.hexToBytes(newSalt)
+        val newHash = CryptoManager.hashPin(newPin, newSalt)
 
-        val updated = acc.copy(passwordHash = newHash, saltHex = newSalt)
+        // Re-wrap Master Key with new PIN KEK
+        val newWrappedMasterKey = CryptoManager.wrapMasterKeyWithPin(
+            masterKey = currentMasterKey,
+            pin = newPin,
+            salt = newSaltBytes
+        )
+        val newWrappedMasterKeyHex = CryptoManager.bytesToHex(newWrappedMasterKey)
+
+        // Update Keystore wrapping
+        val keystoreAlias = "vault_master_key_${acc.vaultId}"
+        val wrappedBio = KeystoreHelper.wrapMasterKey(keystoreAlias, currentMasterKey)
+        val wrappedBioHex = wrappedBio?.let { CryptoManager.bytesToHex(it) }
+
+        val updated = acc.copy(
+            passwordHash = newHash,
+            saltHex = newSalt,
+            wrappedMasterKeyHex = newWrappedMasterKeyHex,
+            keystoreWrappedMasterKeyHex = wrappedBioHex ?: acc.keystoreWrappedMasterKeyHex
+        )
+
         val allAccounts = getAllAccounts().toMutableMap()
         allAccounts[acc.vaultId] = updated
         saveAllAccounts(allAccounts)
@@ -288,19 +345,104 @@ class VaultManager(context: Context) {
             .apply()
 
         _account.value = updated
-        activePassword = newPass
+        activeMasterKey = currentMasterKey
+        activePin = newPin
+        settingsManager.resetFailedPinAttempts()
         return true
     }
 
-    fun lock() {
-        activePassword = null
-        _isUnlocked.value = false
+    /**
+     * Enables or disables biometric unlock.
+     * When enabling, ensures the Master Key is wrapped by Android Keystore.
+     */
+    fun setBiometricEnabled(enabled: Boolean) {
+        val acc = _account.value ?: return
+        var wrappedBioHex = acc.keystoreWrappedMasterKeyHex
+
+        if (enabled && activeMasterKey != null) {
+            val keystoreAlias = "vault_master_key_${acc.vaultId}"
+            val wrappedBio = KeystoreHelper.wrapMasterKey(keystoreAlias, activeMasterKey!!)
+            if (wrappedBio != null) {
+                wrappedBioHex = CryptoManager.bytesToHex(wrappedBio)
+            }
+        } else if (!enabled) {
+            val keystoreAlias = "vault_master_key_${acc.vaultId}"
+            KeystoreHelper.deleteKey(keystoreAlias)
+            wrappedBioHex = null
+        }
+
+        val updated = acc.copy(
+            isBiometricEnabled = enabled,
+            keystoreWrappedMasterKeyHex = wrappedBioHex
+        )
+        val allAccounts = getAllAccounts().toMutableMap()
+        allAccounts[acc.vaultId] = updated
+        saveAllAccounts(allAccounts)
+        prefs.edit().putBoolean(KEY_BIOMETRIC, enabled).apply()
+        _account.value = updated
     }
 
-    fun switchAccount() {
-        lock()
-        _account.value = null
-        prefs.edit().remove(KEY_CURRENT_ACTIVE_VAULT_ID).apply()
+    /**
+     * Restores an account from a valid backup archive or switches between local accounts.
+     */
+    fun restoreAccountFromBackup(account: VaultAccount, masterKey: ByteArray, pin: String) {
+        val allAccounts = getAllAccounts().toMutableMap()
+        val keystoreAlias = "vault_master_key_${account.vaultId}"
+        val wrappedBio = KeystoreHelper.wrapMasterKey(keystoreAlias, masterKey)
+        val wrappedBioHex = wrappedBio?.let { CryptoManager.bytesToHex(it) }
+
+        val finalized = account.copy(
+            keystoreWrappedMasterKeyHex = wrappedBioHex ?: account.keystoreWrappedMasterKeyHex
+        )
+        allAccounts[finalized.vaultId] = finalized
+        saveAllAccounts(allAccounts)
+
+        prefs.edit()
+            .putString(KEY_CURRENT_ACTIVE_VAULT_ID, finalized.vaultId)
+            .putString(KEY_VAULT_ID, finalized.vaultId)
+            .putString(KEY_USER_NAME, finalized.userName)
+            .putString(KEY_PWD_HASH, finalized.passwordHash)
+            .putString(KEY_SALT, finalized.saltHex)
+            .apply()
+
+        _account.value = finalized
+        activeMasterKey = masterKey
+        activePin = pin
+        _isUnlocked.value = true
+        settingsManager.resetFailedPinAttempts()
+    }
+
+    fun loginWithExistingAccount(vaultId: String, pin: String): Boolean {
+        val cleanInputId = vaultId.trim().uppercase(Locale.ROOT)
+        val targetId = if (cleanInputId.startsWith("VLT-")) cleanInputId else "VLT-$cleanInputId"
+        val allAccounts = getAllAccounts()
+        val existing = allAccounts[targetId] ?: return false
+
+        _account.value = existing
+        prefs.edit().putString(KEY_CURRENT_ACTIVE_VAULT_ID, targetId).apply()
+        return verifyAndUnlock(pin)
+    }
+
+    fun loginWithCredentials(userName: String, vaultId: String, pin: String): Boolean {
+        val cleanInputId = vaultId.trim().uppercase(Locale.ROOT)
+        val targetId = if (cleanInputId.startsWith("VLT-")) cleanInputId else "VLT-$cleanInputId"
+        val allAccounts = getAllAccounts().toMutableMap()
+        val existing = allAccounts[targetId] ?: return false
+
+        val updated = existing.copy(userName = userName.trim().ifBlank { existing.userName })
+        allAccounts[targetId] = updated
+        saveAllAccounts(allAccounts)
+        prefs.edit().putString(KEY_CURRENT_ACTIVE_VAULT_ID, targetId).apply()
+        _account.value = updated
+        return verifyAndUnlock(pin)
+    }
+
+    fun lock() {
+        // Zero in-memory master key
+        activeMasterKey?.fill(0)
+        activeMasterKey = null
+        activePin = null
+        _isUnlocked.value = false
     }
 
     fun logout() {
@@ -309,10 +451,9 @@ class VaultManager(context: Context) {
         prefs.edit().remove(KEY_CURRENT_ACTIVE_VAULT_ID).apply()
     }
 
-    // Helper to generate a cryptographically unique formatted ID like VLT-982B-7AF1-30CE
     private fun generateUniqueVaultId(existingIds: Set<String>): String {
         val random = SecureRandom()
-        val chars = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ" // non-ambiguous chars
+        val chars = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
         fun part(length: Int): String = (1..length).map { chars[random.nextInt(chars.length)] }.joinToString("")
         var candidate: String
         do {
@@ -333,4 +474,3 @@ class VaultManager(context: Context) {
         private const val KEY_BIOMETRIC = "vault_biometric_enabled"
     }
 }
-

@@ -116,8 +116,23 @@ class GalleryViewModel(
     private val _statusMessage = MutableStateFlow<String?>(null)
     val statusMessage: StateFlow<String?> = _statusMessage.asStateFlow()
 
+    private val _lockoutRemainingSeconds = MutableStateFlow(settingsManager.getLockoutRemainingSeconds())
+    val lockoutRemainingSeconds: StateFlow<Long> = _lockoutRemainingSeconds.asStateFlow()
+
+    private val _isPartialAccessOnly = MutableStateFlow(
+        DeviceMediaStoreManager.isPartialAccessOnly(application)
+    )
+    val isPartialAccessOnly: StateFlow<Boolean> = _isPartialAccessOnly.asStateFlow()
+
     init {
         refreshDevicePhotos()
+        viewModelScope.launch {
+            while (true) {
+                val remaining = settingsManager.getLockoutRemainingSeconds()
+                _lockoutRemainingSeconds.value = remaining
+                kotlinx.coroutines.delay(1000)
+            }
+        }
         viewModelScope.launch {
             if (settingsManager.isFirstLaunch) {
                 repository.importSamplePhoto(isEncrypted = false, autoUploadToCloud = false)
@@ -267,23 +282,117 @@ class GalleryViewModel(
     }
 
     fun loginWithVaultCredentials(vaultId: String, passwordOrPin: String): Boolean {
-        val success = vaultManager.loginWithCredentials(vaultId, passwordOrPin)
+        val remaining = settingsManager.getLockoutRemainingSeconds()
+        if (remaining > 0) {
+            _statusMessage.value = "Too many failed attempts. Locked out for ${remaining}s"
+            _lockoutRemainingSeconds.value = remaining
+            return false
+        }
+
+        val success = vaultManager.loginWithExistingAccount(vaultId, passwordOrPin)
         if (success) {
             _statusMessage.value = "Vault unlocked successfully!"
+            _lockoutRemainingSeconds.value = 0L
         } else {
-            _statusMessage.value = "Invalid Vault ID or 6-digit PIN"
+            val all = vaultManager.getAllAccounts()
+            val target = if (vaultId.startsWith("VLT-", true)) vaultId.uppercase() else "VLT-${vaultId.uppercase()}"
+            if (!all.containsKey(target)) {
+                _statusMessage.value = "Vault not found on device. Use 'Restore from Backup' to import your vault."
+            } else {
+                val newLock = settingsManager.getLockoutRemainingSeconds()
+                _lockoutRemainingSeconds.value = newLock
+                _statusMessage.value = if (newLock > 0) "Locked out for ${newLock}s" else "Incorrect 6-Digit PIN"
+            }
         }
         return success
     }
 
     fun unlockVaultWithPassword(passwordOrPin: String): Boolean {
+        val remaining = settingsManager.getLockoutRemainingSeconds()
+        if (remaining > 0) {
+            _statusMessage.value = "Too many failed attempts. Locked out for ${remaining}s"
+            _lockoutRemainingSeconds.value = remaining
+            return false
+        }
+
         val success = vaultManager.verifyAndUnlock(passwordOrPin)
         if (success) {
             _statusMessage.value = "Vault unlocked"
+            _lockoutRemainingSeconds.value = 0L
         } else {
-            _statusMessage.value = "Incorrect 6-Digit PIN"
+            val newLockout = settingsManager.getLockoutRemainingSeconds()
+            _lockoutRemainingSeconds.value = newLockout
+            if (newLockout > 0) {
+                _statusMessage.value = "Too many failed attempts. Locked out for ${newLockout}s"
+            } else {
+                _statusMessage.value = "Incorrect 6-Digit PIN"
+            }
         }
         return success
+    }
+
+    fun exportBackupArchive(
+        includeGallery: Boolean,
+        backupPasswordOrPin: String,
+        onComplete: (java.io.File?) -> Unit
+    ) {
+        viewModelScope.launch {
+            _isUploading.value = true
+            try {
+                val app = getApplication<android.app.Application>()
+                val backupBytes = com.example.data.BackupManager.createEncryptedBackup(
+                    context = app,
+                    account = vaultAccount.value,
+                    vaultPhotos = vaultPhotos.value,
+                    galleryPhotos = publicPhotos.value,
+                    includeGalleryPhotos = includeGallery,
+                    backupPasswordOrPin = backupPasswordOrPin
+                )
+                val backupDir = java.io.File(app.cacheDir, "backups").apply { mkdirs() }
+                val backupFile = java.io.File(backupDir, "gallery_vault_${System.currentTimeMillis()}.vaultbackup")
+                backupFile.outputStream().use { it.write(backupBytes) }
+                _statusMessage.value = "Backup created & verified! (${backupBytes.size / 1024} KB)"
+                onComplete(backupFile)
+            } catch (e: Exception) {
+                _statusMessage.value = "Backup failed: ${e.localizedMessage}"
+                onComplete(null)
+            } finally {
+                _isUploading.value = false
+            }
+        }
+    }
+
+    fun restoreBackupArchive(
+        backupUri: Uri,
+        backupPasswordOrPin: String,
+        onComplete: (Boolean, String) -> Unit
+    ) {
+        viewModelScope.launch {
+            _isUploading.value = true
+            try {
+                val app = getApplication<android.app.Application>()
+                val rawBytes = app.contentResolver.openInputStream(backupUri)?.use { it.readBytes() }
+                    ?: throw IllegalArgumentException("Could not read backup file from device.")
+
+                val db = com.example.data.AppDatabase.getDatabase(app)
+                val result = com.example.data.BackupManager.restoreEncryptedBackup(
+                    context = app,
+                    backupBytes = rawBytes,
+                    backupPasswordOrPin = backupPasswordOrPin,
+                    vaultManager = vaultManager,
+                    photoDao = db.photoDao()
+                )
+
+                _statusMessage.value = "Restored ${result.restoredMediaCount} item(s) from backup!"
+                onComplete(true, "Restored ${result.restoredMediaCount} item(s) successfully")
+            } catch (e: Exception) {
+                val err = e.localizedMessage ?: "Failed to restore backup"
+                _statusMessage.value = "Restore failed: $err"
+                onComplete(false, err)
+            } finally {
+                _isUploading.value = false
+            }
+        }
     }
 
     fun unlockVaultWithBiometrics(): Boolean {
@@ -334,7 +443,7 @@ class GalleryViewModel(
             try {
                 val app = getApplication<android.app.Application>()
                 val isEncrypted = photo.isEncrypted
-                val activePin = vaultManager.getActivePin()
+                val masterKey = vaultManager.getActiveMasterKey()
                 
                 val dir = java.io.File(app.filesDir, if (isEncrypted) "vault" else "gallery").apply { mkdirs() }
                 val ext = if (isEncrypted) "vlt" else "jpg"
@@ -345,12 +454,8 @@ class GalleryViewModel(
                     stream.toByteArray()
                 }
                 
-                val finalBytes = if (isEncrypted) {
-                    if (activePin != null) {
-                        com.example.crypto.CryptoManager.encryptBytes(rawBytes, activePin)
-                    } else {
-                        rawBytes
-                    }
+                val finalBytes = if (isEncrypted && masterKey != null) {
+                    com.example.crypto.CryptoManager.encryptWithMasterKey(rawBytes, masterKey)
                 } else {
                     rawBytes
                 }

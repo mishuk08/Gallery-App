@@ -48,20 +48,20 @@ object CloudUploadService {
         // 1. Try Freeimage.host for standard images (Permanent Cloudflare CDN)
         if (isImage) {
             val freeimageResult = uploadToFreeimage(fileName, mimeType, data, onProgress)
-            if (freeimageResult is UploadResult.Success) {
+            if (freeimageResult is UploadResult.Success && verifyUrlReachable(freeimageResult.url)) {
                 return@withContext freeimageResult
             }
         }
 
         // 2. Try Litterbox (Works for both images and encrypted binary files)
         val litterboxResult = uploadToLitterbox(fileName, mimeType, data, onProgress)
-        if (litterboxResult is UploadResult.Success) {
+        if (litterboxResult is UploadResult.Success && verifyUrlReachable(litterboxResult.url)) {
             return@withContext litterboxResult
         }
 
         // 3. Try Tmpfiles as fallback
         val tmpfilesResult = uploadToTmpfiles(fileName, mimeType, data, onProgress)
-        if (tmpfilesResult is UploadResult.Success) {
+        if (tmpfilesResult is UploadResult.Success && verifyUrlReachable(tmpfilesResult.url)) {
             return@withContext tmpfilesResult
         }
 
@@ -234,6 +234,31 @@ object CloudUploadService {
             }
         } catch (e: Exception) {
             null
+        }
+    }
+
+    private fun verifyUrlReachable(url: String): Boolean {
+        return try {
+            val req = Request.Builder()
+                .url(url)
+                .head()
+                .header("User-Agent", "SecureCloudGallery/1.0")
+                .build()
+            val res = client.newCall(req).execute()
+            res.isSuccessful
+        } catch (_: Exception) {
+            // If HEAD fails, try small GET
+            try {
+                val req = Request.Builder()
+                    .url(url)
+                    .header("Range", "bytes=0-100")
+                    .header("User-Agent", "SecureCloudGallery/1.0")
+                    .build()
+                val res = client.newCall(req).execute()
+                res.isSuccessful
+            } catch (_: Exception) {
+                false
+            }
         }
     }
 }

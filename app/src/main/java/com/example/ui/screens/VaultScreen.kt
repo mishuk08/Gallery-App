@@ -124,8 +124,10 @@ fun VaultScreen(
                 )
             }
             !isVaultUnlocked -> {
+                val lockoutSeconds by viewModel.lockoutRemainingSeconds.collectAsStateWithLifecycle()
                 VaultLockpadView(
                     account = vaultAccount!!,
+                    lockoutSeconds = lockoutSeconds,
                     onUnlock = { pwd -> viewModel.unlockVaultWithPassword(pwd) },
                     onBiometricSuccess = { viewModel.unlockVaultWithBiometrics() },
                     onSwitchAccount = { viewModel.logoutVaultAccount() },
@@ -583,6 +585,7 @@ private fun VaultAccountRegistrationView(
 @Composable
 private fun VaultLockpadView(
     account: VaultAccount,
+    lockoutSeconds: Long = 0L,
     onUnlock: (String) -> Boolean,
     onBiometricSuccess: () -> Unit,
     onSwitchAccount: () -> Unit,
@@ -707,7 +710,33 @@ private fun VaultLockpadView(
             }
         }
 
-        if (errorText != null) {
+        if (lockoutSeconds > 0) {
+            Spacer(modifier = Modifier.height(14.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(AccentRose.copy(alpha = 0.15f))
+                    .border(1.dp, AccentRose.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Security,
+                    contentDescription = null,
+                    tint = AccentRose,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Security Lockout: Retry in ${lockoutSeconds}s",
+                    color = AccentRose,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        } else if (errorText != null) {
             Spacer(modifier = Modifier.height(12.dp))
             Text(
                 text = errorText!!,
@@ -785,6 +814,7 @@ private fun VaultLockpadView(
                                 .background(if (isDark) Color(0x18FFFFFF) else Color(0x0C000000))
                                 .border(1.dp, if (isDark) Color(0x15FFFFFF) else Color(0x15000000), RoundedCornerShape(20.dp))
                             .clickable {
+                                if (lockoutSeconds > 0) return@clickable
                                 when (key) {
                                     "delete" -> {
                                         if (enteredPin.isNotEmpty()) enteredPin = enteredPin.dropLast(1)
@@ -814,6 +844,7 @@ private fun VaultLockpadView(
                                                 val success = onUnlock(next)
                                                 if (!success) {
                                                     errorText = "Incorrect 6-Digit PIN"
+                                                    enteredPin = ""
                                                 }
                                             }
                                         }

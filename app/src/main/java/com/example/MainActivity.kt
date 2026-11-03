@@ -114,6 +114,16 @@ fun MainAppScreen(viewModel: GalleryViewModel, isDark: Boolean = true) {
         }
     }
 
+    val context = androidx.compose.ui.platform.LocalContext.current
+    LaunchedEffect(currentTab, isAppLocked) {
+        val activity = context as? android.app.Activity ?: return@LaunchedEffect
+        if (currentTab == GalleryTab.VAULT || isAppLocked) {
+            activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
+
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->

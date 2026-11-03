@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
@@ -41,6 +42,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.data.PhotoEntity
@@ -234,6 +236,45 @@ fun PhotoThumbnail(
                         tint = AccentGold,
                         modifier = Modifier.size(12.dp)
                     )
+                }
+            }
+        }
+
+        // Bottom Video Duration Badge
+        if (photo.isVideo) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(8.dp)
+                    .liquidGlass(
+                        shape = RoundedCornerShape(8.dp),
+                        tint = Color.Black,
+                        tintAlpha = 0.65f,
+                        borderAlpha = 0.4f
+                    )
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Video",
+                        tint = Color.White,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    if (photo.durationMs > 0) {
+                        val totalSecs = photo.durationMs / 1000
+                        val mins = totalSecs / 60
+                        val secs = totalSecs % 60
+                        androidx.compose.material3.Text(
+                            text = "%d:%02d".format(mins, secs),
+                            color = Color.White,
+                            fontSize = 10.sp,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
+                        )
+                    }
                 }
             }
         }

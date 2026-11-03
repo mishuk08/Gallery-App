@@ -53,8 +53,8 @@ import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.filled.OpenInBrowser
-import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Tune
@@ -709,7 +709,7 @@ fun PhotoDetailDialog(
                                 }
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.RotateRight,
+                                    imageVector = Icons.AutoMirrored.Filled.RotateRight,
                                     contentDescription = null,
                                     modifier = Modifier.size(18.dp)
                                 )
