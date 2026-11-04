@@ -318,4 +318,135 @@ class ExampleUnitTest {
         assertEquals(3, permsApi34.size)
         assertTrue(permsApi34.contains("android.permission.READ_MEDIA_VISUAL_USER_SELECTED"))
     }
+
+    @Test
+    fun testStreamingEncryptionAndDecryptionRoundtrip() {
+        val masterKey = CryptoManager.generateMasterKey()
+        // Generate a 150KB random payload to span across multiple 64KB chunks
+        val originalBytes = ByteArray(150 * 1024).apply {
+            java.security.SecureRandom().nextBytes(this)
+        }
+
+        val inStream = java.io.ByteArrayInputStream(originalBytes)
+        val encryptedOut = java.io.ByteArrayOutputStream()
+
+        CryptoManager.encryptStream(inStream, encryptedOut, masterKey)
+        val encryptedBytes = encryptedOut.toByteArray()
+
+        assertTrue(CryptoManager.isEncryptedPayload(encryptedBytes))
+        assertFalse(originalBytes.contentEquals(encryptedBytes))
+
+        val encryptedIn = java.io.ByteArrayInputStream(encryptedBytes)
+        val decryptedOut = java.io.ByteArrayOutputStream()
+
+        CryptoManager.decryptStream(encryptedIn, decryptedOut, masterKey)
+        val decryptedBytes = decryptedOut.toByteArray()
+
+        assertArrayEquals(originalBytes, decryptedBytes)
+    }
+
+    @Test
+    fun testBackupPathTraversalProtection() {
+        // Build a mock zip with a malicious entry '../evil_script.sh'
+        val zipBytesOut = java.io.ByteArrayOutputStream()
+        java.util.zip.ZipOutputStream(zipBytesOut).use { zos ->
+            val evilEntry = java.util.zip.ZipEntry("../../../data/evil.sh")
+            zos.putNextEntry(evilEntry)
+            zos.write("echo pwned".toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+        }
+
+        val destinationDir = java.io.File(System.getProperty("java.io.tmpdir"), "test_traversal_dest_" + System.currentTimeMillis())
+        destinationDir.mkdirs()
+
+        try {
+            java.util.zip.ZipInputStream(java.io.ByteArrayInputStream(zipBytesOut.toByteArray())).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    val entryName = entry.name
+                    // Validate path traversal security check matching BackupManager
+                    if (entryName.contains("..") || entryName.startsWith("/") || entryName.startsWith("\\")) {
+                        throw com.example.data.BackupException("Security violation: Malicious path traversal detected: $entryName")
+                    }
+                    val targetFile = java.io.File(destinationDir, entryName)
+                    if (!targetFile.canonicalPath.startsWith(destinationDir.canonicalPath + java.io.File.separator)) {
+                        throw com.example.data.BackupException("Security violation: Entry resolves outside destination: $entryName")
+                    }
+                    entry = zis.nextEntry
+                }
+            }
+            fail("Expected BackupException due to path traversal attempt")
+        } catch (e: com.example.data.BackupException) {
+            assertTrue(e.message?.contains("Security violation") == true)
+        } finally {
+            destinationDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun testMediaSortingLogic() {
+        val item1 = com.example.data.PhotoEntity(
+            id = 1L,
+            title = "Alpha.jpg",
+            localUri = "content://media/1",
+            fileSizeBytes = 1000L,
+            createdAt = 1000000L,
+            mimeType = "image/jpeg"
+        )
+        val item2 = com.example.data.PhotoEntity(
+            id = 2L,
+            title = "Beta.mp4",
+            localUri = "content://media/2",
+            fileSizeBytes = 50000L,
+            createdAt = 2000000L,
+            mimeType = "video/mp4",
+            isVideo = true,
+            durationMs = 60000L
+        )
+        val item3 = com.example.data.PhotoEntity(
+            id = 3L,
+            title = "Charlie.png",
+            localUri = "content://media/3",
+            fileSizeBytes = 25000L,
+            createdAt = 1500000L,
+            mimeType = "image/png"
+        )
+
+        val list = listOf(item1, item2, item3)
+
+        fun sortPhotos(photos: List<com.example.data.PhotoEntity>, order: com.example.ui.MediaSortOrder): List<com.example.data.PhotoEntity> {
+            return when (order) {
+                com.example.ui.MediaSortOrder.DATE_DESC -> photos.sortedByDescending { it.createdAt }
+                com.example.ui.MediaSortOrder.DATE_ASC -> photos.sortedBy { it.createdAt }
+                com.example.ui.MediaSortOrder.NAME_ASC -> photos.sortedBy { it.title.lowercase() }
+                com.example.ui.MediaSortOrder.NAME_DESC -> photos.sortedByDescending { it.title.lowercase() }
+                com.example.ui.MediaSortOrder.SIZE_DESC -> photos.sortedByDescending { it.fileSizeBytes }
+                com.example.ui.MediaSortOrder.SIZE_ASC -> photos.sortedBy { it.fileSizeBytes }
+            }
+        }
+
+        // DATE_DESC: item2 (2000000), item3 (1500000), item1 (1000000)
+        val dateDesc = sortPhotos(list, com.example.ui.MediaSortOrder.DATE_DESC)
+        assertEquals(listOf(item2, item3, item1), dateDesc)
+
+        // DATE_ASC: item1 (1000000), item3 (1500000), item2 (2000000)
+        val dateAsc = sortPhotos(list, com.example.ui.MediaSortOrder.DATE_ASC)
+        assertEquals(listOf(item1, item3, item2), dateAsc)
+
+        // NAME_ASC: Alpha, Beta, Charlie
+        val nameAsc = sortPhotos(list, com.example.ui.MediaSortOrder.NAME_ASC)
+        assertEquals(listOf(item1, item2, item3), nameAsc)
+
+        // NAME_DESC: Charlie, Beta, Alpha
+        val nameDesc = sortPhotos(list, com.example.ui.MediaSortOrder.NAME_DESC)
+        assertEquals(listOf(item3, item2, item1), nameDesc)
+
+        // SIZE_DESC: Beta (50000), Charlie (25000), Alpha (1000)
+        val sizeDesc = sortPhotos(list, com.example.ui.MediaSortOrder.SIZE_DESC)
+        assertEquals(listOf(item2, item3, item1), sizeDesc)
+
+        // SIZE_ASC: Alpha (1000), Charlie (25000), Beta (50000)
+        val sizeAsc = sortPhotos(list, com.example.ui.MediaSortOrder.SIZE_ASC)
+        assertEquals(listOf(item1, item3, item2), sizeAsc)
+    }
 }

@@ -377,6 +377,95 @@ class PhotoRepository(
     /**
      * Toggles encryption between Vault and Public Gallery.
      */
+    sealed class VaultMigrationResult {
+        data class Success(val entity: PhotoEntity, val originalDeleted: Boolean) : VaultMigrationResult()
+        data class Error(val message: String, val recoverableException: Exception? = null) : VaultMigrationResult()
+    }
+
+    /**
+     * Safely migrates a device photo or video to the Encrypted Vault.
+     * Enforces the critical safety rule:
+     * 1. Encrypt directly into a temporary file (vault_temp_*.vlt) using streaming AES-256-GCM.
+     * 2. Verify encrypted file integrity and test decrypt to guarantee zero data loss.
+     * 3. Atomically rename to final vault file.
+     * 4. Persist encrypted PhotoEntity record in Room SQLite database.
+     * 5. Only after successful encryption, verification, and database commit: attempt deletion of original media.
+     */
+    suspend fun moveDevicePhotoToVault(mediaPhoto: LocalMediaPhoto): VaultMigrationResult = withContext(Dispatchers.IO) {
+        val masterKey = vaultManager.getActiveMasterKey()
+            ?: return@withContext VaultMigrationResult.Error("Vault is locked! Please authenticate first.")
+
+        val sourceUri = Uri.parse(mediaPhoto.contentUri)
+        val vaultDir = File(context.filesDir, "vault").apply { mkdirs() }
+        val tempFile = File(vaultDir, "vault_temp_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}.vlt")
+        val finalFileName = "vault_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}.vlt"
+        val finalFile = File(vaultDir, finalFileName)
+
+        try {
+            val inputStream = context.contentResolver.openInputStream(sourceUri)
+                ?: return@withContext VaultMigrationResult.Error("Could not open source file: ${mediaPhoto.displayName}")
+
+            FileOutputStream(tempFile).use { fos ->
+                CryptoManager.encryptStream(inputStream, fos, masterKey)
+            }
+
+            if (!tempFile.exists() || tempFile.length() < 20) {
+                tempFile.delete()
+                return@withContext VaultMigrationResult.Error("Encrypted file verification failed: empty output.")
+            }
+
+            // Verify with test stream decryption of the header & authentication
+            val testDecryptedBytes = java.io.ByteArrayOutputStream()
+            java.io.FileInputStream(tempFile).use { fis ->
+                CryptoManager.decryptStream(fis, testDecryptedBytes, masterKey)
+            }
+            if (testDecryptedBytes.size() == 0 && mediaPhoto.sizeBytes > 0) {
+                tempFile.delete()
+                return@withContext VaultMigrationResult.Error("Integrity check failed: decrypted stream is empty.")
+            }
+
+            if (!tempFile.renameTo(finalFile)) {
+                tempFile.copyTo(finalFile, overwrite = true)
+                tempFile.delete()
+            }
+
+            val activeVaultId = vaultManager.account.value?.vaultId ?: "Vault"
+            val entity = PhotoEntity(
+                title = mediaPhoto.displayName,
+                description = "Moved to private vault",
+                localUri = Uri.fromFile(finalFile).toString(),
+                localFilePath = finalFile.absolutePath,
+                cloudUrl = null,
+                uploadStatus = "LOCAL_ONLY",
+                syncStatus = PhotoEntity.SYNC_STATUS_LOCAL_ONLY,
+                isEncrypted = true,
+                fileSizeBytes = finalFile.length(),
+                mimeType = mediaPhoto.mimeType,
+                createdAt = mediaPhoto.dateAdded,
+                album = activeVaultId,
+                isOfflineAvailable = true,
+                isVideo = mediaPhoto.isVideo,
+                durationMs = mediaPhoto.durationMs
+            )
+            val insertedId = photoDao.insertPhoto(entity)
+            val savedEntity = entity.copy(id = insertedId)
+
+            var originalDeleted = false
+            try {
+                val rows = context.contentResolver.delete(sourceUri, null, null)
+                originalDeleted = rows > 0
+            } catch (_: Exception) {
+                originalDeleted = false
+            }
+
+            VaultMigrationResult.Success(savedEntity, originalDeleted)
+        } catch (e: Exception) {
+            tempFile.delete()
+            finalFile.delete()
+            VaultMigrationResult.Error("Migration error: ${e.localizedMessage}", e)
+        }
+    }
+
     suspend fun toggleVaultProtection(photo: PhotoEntity, pinOverride: String? = null): Boolean = withContext(Dispatchers.IO) {
         val masterKey = vaultManager.getActiveMasterKey()
         val pin = pinOverride ?: vaultManager.getActivePin()
@@ -395,12 +484,21 @@ class PhotoRepository(
 
             val dir = File(context.filesDir, "gallery").apply { mkdirs() }
             val ext = if (photo.isVideo) "mp4" else "jpg"
+            val tempFile = File(dir, "temp_photo_${System.currentTimeMillis()}.$ext")
+            FileOutputStream(tempFile).use { it.write(decryptedBytes) }
+
+            if (!tempFile.exists() || tempFile.length() == 0L) {
+                tempFile.delete()
+                return@withContext false
+            }
+
             val newFile = File(dir, "photo_${System.currentTimeMillis()}.$ext")
-            FileOutputStream(newFile).use { it.write(decryptedBytes) }
+            if (!tempFile.renameTo(newFile)) {
+                tempFile.copyTo(newFile, overwrite = true)
+                tempFile.delete()
+            }
 
-            // Delete old encrypted file
-            photo.localFilePath?.let { File(it).delete() }
-
+            // Update DB before deleting old encrypted file
             val updated = photo.copy(
                 isEncrypted = false,
                 localUri = Uri.fromFile(newFile).toString(),
@@ -413,6 +511,7 @@ class PhotoRepository(
                 album = if (photo.isVideo) "Videos" else "All"
             )
             photoDao.updatePhoto(updated)
+            photo.localFilePath?.let { File(it).delete() }
             true
         } else {
             // Move from Public Gallery -> Vault (Encrypt)
@@ -426,11 +525,19 @@ class PhotoRepository(
             val encryptedBytes = CryptoManager.encryptWithMasterKey(rawBytes, effectiveMasterKey)
 
             val dir = File(context.filesDir, "vault").apply { mkdirs() }
-            val newFile = File(dir, "vault_${System.currentTimeMillis()}.vlt")
-            FileOutputStream(newFile).use { it.write(encryptedBytes) }
+            val tempFile = File(dir, "temp_vault_${System.currentTimeMillis()}.vlt")
+            FileOutputStream(tempFile).use { it.write(encryptedBytes) }
 
-            // Delete old plaintext file
-            photo.localFilePath?.let { File(it).delete() }
+            if (!tempFile.exists() || tempFile.length() < 20) {
+                tempFile.delete()
+                return@withContext false
+            }
+
+            val newFile = File(dir, "vault_${System.currentTimeMillis()}.vlt")
+            if (!tempFile.renameTo(newFile)) {
+                tempFile.copyTo(newFile, overwrite = true)
+                tempFile.delete()
+            }
 
             val activeVaultId = vaultManager.account.value?.vaultId ?: "Vault"
             val updated = photo.copy(
@@ -445,9 +552,14 @@ class PhotoRepository(
                 album = activeVaultId
             )
             photoDao.updatePhoto(updated)
+            photo.localFilePath?.let { File(it).delete() }
             true
         }
     }
+
+    val distinctAlbums: Flow<List<String>> = photoDao.getDistinctAlbums()
+    suspend fun renameAlbum(oldName: String, newName: String) = photoDao.renameAlbum(oldName, newName)
+    suspend fun deleteAlbum(albumName: String) = photoDao.deleteAlbum(albumName)
 
     suspend fun uploadToCloud(
         photo: PhotoEntity,

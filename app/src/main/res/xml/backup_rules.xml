@@ -1,13 +1,19 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Android Auto Backup Rules (Legacy full-backup content for pre-API 31 devices).
+   Strictly excludes vault directories, databases, and sensitive preferences.
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <!-- Exclude private encrypted files in internal storage -->
+    <exclude domain="file" path="vault" />
+    <exclude domain="file" path="backups" />
+
+    <!-- Exclude databases -->
+    <exclude domain="database" path="gallery_database" />
+    <exclude domain="database" path="gallery_database-wal" />
+    <exclude domain="database" path="gallery_database-shm" />
+
+    <!-- Exclude account authentication preferences -->
+    <exclude domain="sharedpref" path="vault_prefs.xml" />
+    <exclude domain="sharedpref" path="app_settings_prefs.xml" />
 </full-backup-content>

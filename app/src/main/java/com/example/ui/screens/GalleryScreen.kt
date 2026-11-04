@@ -39,6 +39,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Sort
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Download
@@ -134,6 +136,7 @@ fun GalleryScreen(
     val hasStoragePermission by viewModel.hasStoragePermission.collectAsStateWithLifecycle()
     val gridColumns by viewModel.gridColumns.collectAsStateWithLifecycle()
     val isVaultUnlocked by viewModel.isVaultUnlocked.collectAsStateWithLifecycle()
+    val sortOrder by viewModel.sortOrder.collectAsStateWithLifecycle()
     val isDark = LocalIsDarkMode.current
 
     val coroutineScope = rememberCoroutineScope()
@@ -145,6 +148,7 @@ fun GalleryScreen(
     var holdJob by remember { mutableStateOf<Job?>(null) }
 
     var isSearchExpanded by remember { mutableStateOf(false) }
+    var showSortDialog by remember { mutableStateOf(false) }
     var selectedDevicePhoto by remember { mutableStateOf<LocalMediaPhoto?>(null) }
     var accumulatedZoom by remember { androidx.compose.runtime.mutableFloatStateOf(1f) }
     var zoomNotice by remember { mutableStateOf<String?>(null) }
@@ -357,11 +361,12 @@ fun GalleryScreen(
                             )
                             val totalCount = when (activeFilter) {
                                 GalleryFilter.ALL -> publicPhotos.size + devicePhotos.size
+                                GalleryFilter.VIDEOS -> publicPhotos.count { it.isVideo } + devicePhotos.count { it.isVideo }
                                 GalleryFilter.DEVICE_PHOTOS -> devicePhotos.size
                                 GalleryFilter.FAVORITES -> favoritePhotos.size
                             }
                             Text(
-                                text = "$totalCount Photos • Mobile & Local",
+                                text = "$totalCount Items • Mobile & Local",
                                 color = TextSecondary,
                                 fontSize = 12.sp
                             )
@@ -416,6 +421,22 @@ fun GalleryScreen(
                                 Icon(
                                     imageVector = Icons.Default.Search,
                                     contentDescription = "Search",
+                                    tint = TextPrimary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+
+                            // Sort Button
+                            IconButton(
+                                onClick = { showSortDialog = true },
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .liquidGlassThemed(shape = CircleShape)
+                                    .testTag("gallery_sort_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.Sort,
+                                    contentDescription = "Sort media",
                                     tint = TextPrimary,
                                     modifier = Modifier.size(18.dp)
                                 )
@@ -495,7 +516,7 @@ fun GalleryScreen(
                 }
             }
 
-            // Filter Chips Bar (All, Device, Favorites)
+            // Filter Chips Bar (All, Videos, Device, Favorites)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -508,7 +529,12 @@ fun GalleryScreen(
                     onClick = { viewModel.setFilter(GalleryFilter.ALL) }
                 )
                 FilterChip(
-                    label = "Mobile Device (${devicePhotos.size})",
+                    label = "Videos",
+                    selected = activeFilter == GalleryFilter.VIDEOS,
+                    onClick = { viewModel.setFilter(GalleryFilter.VIDEOS) }
+                )
+                FilterChip(
+                    label = "Mobile (${devicePhotos.size})",
                     selected = activeFilter == GalleryFilter.DEVICE_PHOTOS,
                     onClick = { viewModel.setFilter(GalleryFilter.DEVICE_PHOTOS) }
                 )
@@ -538,6 +564,20 @@ fun GalleryScreen(
                     }
             ) {
                 when (activeFilter) {
+                    GalleryFilter.VIDEOS -> {
+                        val videoList = publicPhotos.filter { it.isVideo }
+                        PhotoGrid(
+                            photos = videoList,
+                            repository = viewModel.repository,
+                            isVaultUnlocked = isVaultUnlocked,
+                            columns = gridColumns,
+                            onPhotoClick = { viewModel.selectPhoto(it) },
+                            onUploadClick = onOpenUploadDialog,
+                            onFavoriteToggle = { viewModel.toggleFavorite(it) },
+                            emptyTitle = "No Videos Found",
+                            emptySubtitle = "Device videos and recorded clips will be grouped here."
+                        )
+                    }
                     GalleryFilter.DEVICE_PHOTOS -> {
                         DevicePhotosGrid(
                             photos = devicePhotos,
@@ -658,6 +698,65 @@ fun GalleryScreen(
                     viewModel.moveDevicePhotoToVault(photo)
                     selectedDevicePhoto = null
                 }
+            )
+        }
+
+        // Sort Dialog
+        if (showSortDialog) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showSortDialog = false },
+                title = {
+                    Text("Sort Media", color = TextPrimary, fontWeight = FontWeight.Bold)
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        val sortOptions = listOf(
+                            com.example.ui.MediaSortOrder.DATE_DESC to "Date: Newest First",
+                            com.example.ui.MediaSortOrder.DATE_ASC to "Date: Oldest First",
+                            com.example.ui.MediaSortOrder.NAME_ASC to "Name: A to Z",
+                            com.example.ui.MediaSortOrder.NAME_DESC to "Name: Z to A",
+                            com.example.ui.MediaSortOrder.SIZE_DESC to "Size: Largest First",
+                            com.example.ui.MediaSortOrder.SIZE_ASC to "Size: Smallest First"
+                        )
+                        sortOptions.forEach { (order, label) ->
+                            val isSelected = sortOrder == order
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (isSelected) AccentGold.copy(alpha = 0.2f) else Color.Transparent)
+                                    .clickable {
+                                        viewModel.setSortOrder(order)
+                                        showSortDialog = false
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = label,
+                                    color = if (isSelected) AccentGold else TextPrimary,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    fontSize = 14.sp
+                                )
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = null,
+                                        tint = AccentGold,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = { showSortDialog = false }) {
+                        Text("Close", color = TextSecondary)
+                    }
+                },
+                containerColor = if (isDark) Color(0xFF181B26) else Color.White
             )
         }
     }

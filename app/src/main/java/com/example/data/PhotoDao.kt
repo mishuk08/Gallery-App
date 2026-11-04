@@ -81,4 +81,13 @@ interface PhotoDao {
 
     @Query("SELECT COUNT(*) FROM photos WHERE syncStatus = 'LOCAL_ONLY'")
     fun getLocalOnlyCount(): Flow<Int>
+
+    @Query("SELECT DISTINCT album FROM photos WHERE isEncrypted = 0 AND album IS NOT NULL AND album != '' ORDER BY album ASC")
+    fun getDistinctAlbums(): Flow<List<String>>
+
+    @Query("UPDATE photos SET album = :newAlbumName WHERE album = :oldAlbumName AND isEncrypted = 0")
+    suspend fun renameAlbum(oldAlbumName: String, newAlbumName: String)
+
+    @Query("UPDATE photos SET album = 'All' WHERE album = :albumName AND isEncrypted = 0")
+    suspend fun deleteAlbum(albumName: String)
 }

@@ -1,19 +1,27 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Android 12+ (API 31+) Data Extraction Rules.
+   Strictly excludes private vault files, cryptographic databases, and account secrets
+   from automated cloud backup and unauthenticated device transfers.
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <!-- Exclude private vault files -->
+        <exclude domain="file" path="vault" />
+        <exclude domain="file" path="backups" />
+        <!-- Exclude Room SQLite databases containing private media metadata -->
+        <exclude domain="database" path="gallery_database" />
+        <exclude domain="database" path="gallery_database-wal" />
+        <exclude domain="database" path="gallery_database-shm" />
+        <!-- Exclude preferences containing password hashes and salts -->
+        <exclude domain="sharedpref" path="vault_prefs.xml" />
+        <exclude domain="sharedpref" path="app_settings_prefs.xml" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <!-- Exclude private vault files and raw databases from device migration without user unlock -->
+        <exclude domain="file" path="vault" />
+        <exclude domain="file" path="backups" />
+        <exclude domain="database" path="gallery_database" />
+        <exclude domain="sharedpref" path="vault_prefs.xml" />
     </device-transfer>
-    -->
 </data-extraction-rules>

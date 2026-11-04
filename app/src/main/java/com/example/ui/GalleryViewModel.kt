@@ -32,8 +32,18 @@ enum class GalleryTab {
 
 enum class GalleryFilter {
     ALL,
+    VIDEOS,
     DEVICE_PHOTOS,
     FAVORITES
+}
+
+enum class MediaSortOrder {
+    DATE_DESC,
+    DATE_ASC,
+    NAME_ASC,
+    NAME_DESC,
+    SIZE_DESC,
+    SIZE_ASC
 }
 
 class GalleryViewModel(
@@ -51,6 +61,9 @@ class GalleryViewModel(
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private val _sortOrder = MutableStateFlow(MediaSortOrder.DATE_DESC)
+    val sortOrder: StateFlow<MediaSortOrder> = _sortOrder.asStateFlow()
 
     val vaultAccount: StateFlow<VaultAccount?> = vaultManager.account
     val isVaultUnlocked: StateFlow<Boolean> = vaultManager.isUnlocked
@@ -71,6 +84,9 @@ class GalleryViewModel(
     val localOnlyCount: StateFlow<Int> = repository.localOnlyCount
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
+    val distinctAlbums: StateFlow<List<String>> = repository.distinctAlbums
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     // On initial launch, the app always opens normally. App lock is only engaged if the user configured a PIN.
     private val _isAppLocked = MutableStateFlow(
         settingsManager.appLockEnabled.value && settingsManager.hasAppLockPin.value
@@ -87,11 +103,23 @@ class GalleryViewModel(
     val hasStoragePermission: StateFlow<Boolean> = _hasStoragePermission.asStateFlow()
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    val publicPhotos: StateFlow<List<PhotoEntity>> = _searchQuery.flatMapLatest { query ->
-        if (query.isBlank()) {
-            repository.publicPhotos
-        } else {
-            repository.searchPublicPhotos(query)
+    val publicPhotos: StateFlow<List<PhotoEntity>> = kotlinx.coroutines.flow.combine(
+        _searchQuery.flatMapLatest { query ->
+            if (query.isBlank()) {
+                repository.publicPhotos
+            } else {
+                repository.searchPublicPhotos(query)
+            }
+        },
+        _sortOrder
+    ) { photos, sort ->
+        when (sort) {
+            MediaSortOrder.DATE_DESC -> photos.sortedByDescending { it.createdAt }
+            MediaSortOrder.DATE_ASC -> photos.sortedBy { it.createdAt }
+            MediaSortOrder.NAME_ASC -> photos.sortedBy { it.title.lowercase() }
+            MediaSortOrder.NAME_DESC -> photos.sortedByDescending { it.title.lowercase() }
+            MediaSortOrder.SIZE_DESC -> photos.sortedByDescending { it.fileSizeBytes }
+            MediaSortOrder.SIZE_ASC -> photos.sortedBy { it.fileSizeBytes }
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -156,6 +184,24 @@ class GalleryViewModel(
 
     fun setSearchQuery(query: String) {
         _searchQuery.value = query
+    }
+
+    fun setSortOrder(order: MediaSortOrder) {
+        _sortOrder.value = order
+    }
+
+    fun renameAlbum(oldName: String, newName: String) {
+        viewModelScope.launch {
+            repository.renameAlbum(oldName, newName)
+            _statusMessage.value = "Album renamed to '$newName'"
+        }
+    }
+
+    fun deleteAlbum(albumName: String) {
+        viewModelScope.launch {
+            repository.deleteAlbum(albumName)
+            _statusMessage.value = "Album '$albumName' removed"
+        }
     }
 
     fun clearStatusMessage() {
@@ -495,13 +541,16 @@ class GalleryViewModel(
         viewModelScope.launch {
             _isUploading.value = true
             try {
-                repository.importPhoto(
-                    uri = Uri.parse(mediaPhoto.contentUri),
-                    title = mediaPhoto.displayName,
-                    isEncrypted = true,
-                    autoUploadToCloud = settingsManager.autoCloudBackup.value
-                )
-                _statusMessage.value = "Encrypted & moved '${mediaPhoto.displayName}' into Vault"
+                when (val result = repository.moveDevicePhotoToVault(mediaPhoto)) {
+                    is PhotoRepository.VaultMigrationResult.Success -> {
+                        refreshDevicePhotos()
+                        val deleteNote = if (result.originalDeleted) "Original removed from gallery." else "Original retained on device."
+                        _statusMessage.value = "Encrypted & secured '${mediaPhoto.displayName}' in Vault. $deleteNote"
+                    }
+                    is PhotoRepository.VaultMigrationResult.Error -> {
+                        _statusMessage.value = "Vault migration failed: ${result.message}"
+                    }
+                }
             } catch (e: Exception) {
                 _statusMessage.value = "Failed to encrypt: ${e.localizedMessage}"
             } finally {

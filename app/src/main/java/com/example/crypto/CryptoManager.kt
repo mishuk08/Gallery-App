@@ -2,10 +2,14 @@ package com.example.crypto
 
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
+import javax.crypto.CipherInputStream
+import javax.crypto.CipherOutputStream
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.PBEKeySpec
@@ -111,6 +115,119 @@ object CryptoManager {
         out.write(iv)
         out.write(cipherBytes)
         return out.toByteArray()
+    }
+
+    /**
+     * Encrypts an InputStream directly to an OutputStream in streaming chunks.
+     * Prevents OOM by avoiding loading entire video/photo files into memory.
+     * Format: [4 bytes "VLT2"][12 bytes IV][CIPHERTEXT + 16 bytes GCM TAG]
+     */
+    fun encryptStream(
+        inputStream: InputStream,
+        outputStream: OutputStream,
+        masterKey: ByteArray
+    ) {
+        require(masterKey.size == MASTER_KEY_SIZE_BYTES) { "Invalid master key size" }
+        val keySpec = SecretKeySpec(masterKey, "AES")
+        val iv = ByteArray(IV_LENGTH_BYTES).apply { secureRandom.nextBytes(this) }
+
+        outputStream.write(HEADER_VLT2)
+        outputStream.write(iv)
+
+        val cipher = Cipher.getInstance(ALGORITHM)
+        cipher.init(Cipher.ENCRYPT_MODE, keySpec, GCMParameterSpec(TAG_LENGTH_BITS, iv))
+
+        val cipherOut = CipherOutputStream(outputStream, cipher)
+        val buffer = ByteArray(64 * 1024)
+        var bytesRead: Int
+        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+            cipherOut.write(buffer, 0, bytesRead)
+        }
+        cipherOut.flush()
+        cipherOut.close()
+    }
+
+    /**
+     * Decrypts an encrypted media stream directly to an OutputStream in streaming chunks.
+     */
+    fun decryptStream(
+        inputStream: InputStream,
+        outputStream: OutputStream,
+        masterKey: ByteArray,
+        fallbackPin: String? = null
+    ) {
+        val header = ByteArray(4)
+        var totalHeader = 0
+        while (totalHeader < 4) {
+            val r = inputStream.read(header, totalHeader, 4 - totalHeader)
+            if (r == -1) break
+            totalHeader += r
+        }
+        if (totalHeader < 4) throw CryptoException("Encrypted stream is too short")
+
+        if (header.contentEquals(HEADER_VLT2)) {
+            val iv = ByteArray(IV_LENGTH_BYTES)
+            var totalIv = 0
+            while (totalIv < IV_LENGTH_BYTES) {
+                val r = inputStream.read(iv, totalIv, IV_LENGTH_BYTES - totalIv)
+                if (r == -1) break
+                totalIv += r
+            }
+            if (totalIv < IV_LENGTH_BYTES) throw CryptoException("Corrupted VLT2 stream: missing IV")
+
+            val keySpec = SecretKeySpec(masterKey, "AES")
+            val cipher = Cipher.getInstance(ALGORITHM)
+            cipher.init(Cipher.DECRYPT_MODE, keySpec, GCMParameterSpec(TAG_LENGTH_BITS, iv))
+
+            val cipherIn = CipherInputStream(inputStream, cipher)
+            val buffer = ByteArray(64 * 1024)
+            var bytesRead: Int
+            try {
+                while (cipherIn.read(buffer).also { bytesRead = it } != -1) {
+                    outputStream.write(buffer, 0, bytesRead)
+                }
+                outputStream.flush()
+            } catch (e: Exception) {
+                throw CryptoException("Decryption authentication failed or stream corrupted", e)
+            }
+        } else if (header.contentEquals(HEADER_VLT1)) {
+            if (fallbackPin == null) throw CryptoException("Legacy VLT1 stream requires PIN to decrypt")
+            val salt = ByteArray(SALT_LENGTH_BYTES)
+            var totalSalt = 0
+            while (totalSalt < SALT_LENGTH_BYTES) {
+                val r = inputStream.read(salt, totalSalt, SALT_LENGTH_BYTES - totalSalt)
+                if (r == -1) break
+                totalSalt += r
+            }
+            if (totalSalt < SALT_LENGTH_BYTES) throw CryptoException("Corrupted VLT1: missing salt")
+
+            val iv = ByteArray(IV_LENGTH_BYTES)
+            var totalIv = 0
+            while (totalIv < IV_LENGTH_BYTES) {
+                val r = inputStream.read(iv, totalIv, IV_LENGTH_BYTES - totalIv)
+                if (r == -1) break
+                totalIv += r
+            }
+            if (totalIv < IV_LENGTH_BYTES) throw CryptoException("Corrupted VLT1: missing IV")
+
+            val keySpec = deriveKey(fallbackPin, salt)
+            val cipher = Cipher.getInstance(ALGORITHM)
+            cipher.init(Cipher.DECRYPT_MODE, keySpec, GCMParameterSpec(TAG_LENGTH_BITS, iv))
+
+            val cipherIn = CipherInputStream(inputStream, cipher)
+            val buffer = ByteArray(64 * 1024)
+            var bytesRead: Int
+            try {
+                while (cipherIn.read(buffer).also { bytesRead = it } != -1) {
+                    outputStream.write(buffer, 0, bytesRead)
+                }
+                outputStream.flush()
+            } catch (e: Exception) {
+                throw CryptoException("Legacy decryption failed or corrupted stream", e)
+            }
+        } else {
+            throw CryptoException("Unrecognized or unencrypted stream header")
+        }
     }
 
     /**

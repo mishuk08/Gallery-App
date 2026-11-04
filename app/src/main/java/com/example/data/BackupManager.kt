@@ -157,11 +157,39 @@ object BackupManager {
 
         val zipIn = ZipInputStream(ByteArrayInputStream(plainZipBytes))
         val entries = mutableMapOf<String, ByteArray>()
+        var totalBytesExtracted = 0L
+        var entryCount = 0
 
         var entry = zipIn.nextEntry
         while (entry != null) {
-            val bytes = zipIn.readBytes()
-            entries[entry.name] = bytes
+            entryCount++
+            if (entryCount > 10_000) {
+                throw BackupException("Backup rejected: archive contains excessive entries (limit 10,000)")
+            }
+
+            val entryName = entry.name
+            // 1. Path Traversal (Zip Slip) Protection
+            if (entryName.contains("..") || entryName.startsWith("/") || entryName.contains("\\")) {
+                throw BackupException("Backup rejected: malicious path traversal detected in entry '$entryName'")
+            }
+
+            // 2. ZIP Bomb / Oversized Entry Protection
+            val entryOut = ByteArrayOutputStream()
+            val buffer = ByteArray(8192)
+            var entryBytes = 0L
+            var read: Int
+            while (zipIn.read(buffer).also { read = it } != -1) {
+                entryBytes += read
+                totalBytesExtracted += read
+                if (entryBytes > 500L * 1024 * 1024) {
+                    throw BackupException("Backup rejected: entry '$entryName' exceeds maximum size limit (500MB)")
+                }
+                if (totalBytesExtracted > 2L * 1024 * 1024 * 1024) {
+                    throw BackupException("Backup rejected: uncompressed archive exceeds safety threshold (2GB)")
+                }
+                entryOut.write(buffer, 0, read)
+            }
+            entries[entryName] = entryOut.toByteArray()
             zipIn.closeEntry()
             entry = zipIn.nextEntry
         }
